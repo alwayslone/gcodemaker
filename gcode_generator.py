@@ -23,13 +23,6 @@ try:
 except ImportError:
     SERIAL_AVAILABLE = False
 
-# 尝试导入OCR库 (PaddleOCR)
-try:
-    from paddleocr import PaddleOCR
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
 
 class PaperSizes:
     """纸张规格定义 (单位: mm)"""
@@ -585,6 +578,7 @@ class GCodeApp:
         self.contours = []
         self.image_path = None
         self.gcode_lines = []
+        self.debug_enabled_var = tk.BooleanVar(value=False)
         
         # 选择区域变量
         self.selection_start = None
@@ -928,6 +922,15 @@ class GCodeApp:
         ocr_font_combo = ttk.Combobox(ocr_font_frame, textvariable=self.ocr_font_var, width=10,
                                        values=['simhei', 'simsun', 'msyh', 'arial', 'times'])
         ocr_font_combo.pack(side=tk.LEFT, padx=5)
+
+        ocr_dbg_frame = ttk.Frame(process_frame)
+        ocr_dbg_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Checkbutton(ocr_dbg_frame, text="运行调试输出", variable=self.debug_enabled_var).pack(side=tk.LEFT)
+        ttk.Button(ocr_dbg_frame, text="清空调试", command=self.clear_debug_log, width=8).pack(side=tk.RIGHT)
+
+        ocr_cmp_frame = ttk.Frame(process_frame)
+        ocr_cmp_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Button(ocr_cmp_frame, text="原图/识别后对比", command=self.show_ocr_compare).pack(fill=tk.X)
         
         ttk.Button(process_frame, text="处理图像", command=self.process_image).pack(fill=tk.X, padx=5, pady=5)
         
@@ -1228,13 +1231,20 @@ class GCodeApp:
         # 绑定Delete键删除选中对象
         self.root.bind('<Delete>', self.delete_selected_object)
         
-        # 右下：控制台
-        console_frame = ttk.LabelFrame(bottom_right, text="控制台")
-        console_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.console = scrolledtext.ScrolledText(console_frame, height=10, font=('Consolas', 9))
+        bottom_notebook = ttk.Notebook(bottom_right)
+        bottom_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        console_tab = ttk.Frame(bottom_notebook)
+        bottom_notebook.add(console_tab, text="控制台")
+        self.console = scrolledtext.ScrolledText(console_tab, height=10, font=('Consolas', 9))
         self.console.pack(fill=tk.BOTH, expand=True)
         self.console.config(state=tk.DISABLED)
+
+        debug_tab = ttk.Frame(bottom_notebook)
+        bottom_notebook.add(debug_tab, text="调试")
+        self.debug_console = scrolledtext.ScrolledText(debug_tab, height=10, font=('Consolas', 9))
+        self.debug_console.pack(fill=tk.BOTH, expand=True)
+        self.debug_console.config(state=tk.DISABLED)
         
         # 初始化
         self.selection_mode = False
@@ -1253,6 +1263,25 @@ class GCodeApp:
         self.console.insert(tk.END, message + '\n')
         self.console.see(tk.END)
         self.console.config(state=tk.DISABLED)
+
+    def debug_log(self, message):
+        if not getattr(self, 'debug_enabled_var', None):
+            return
+        if not self.debug_enabled_var.get():
+            return
+        if not getattr(self, 'debug_console', None):
+            return
+        self.debug_console.config(state=tk.NORMAL)
+        self.debug_console.insert(tk.END, message + '\n')
+        self.debug_console.see(tk.END)
+        self.debug_console.config(state=tk.DISABLED)
+
+    def clear_debug_log(self):
+        if not getattr(self, 'debug_console', None):
+            return
+        self.debug_console.config(state=tk.NORMAL)
+        self.debug_console.delete('1.0', tk.END)
+        self.debug_console.config(state=tk.DISABLED)
     
     # === GRBL回调函数 ===
     def on_grbl_status(self, status):
@@ -1859,186 +1888,7 @@ class GCodeApp:
         rotated_rgb = np.array(rotated_pil)
         rotated_bgr = cv2.cvtColor(rotated_rgb, cv2.COLOR_RGB2BGR)
         return rotated_bgr
-    
-  ###  def _process_ocr_image(self, img):
-        """使用PaddleOCR识别文字并转换为骨架图"""
-        if not OCR_AVAILABLE:
-            messagebox.showerror("错误", "未安装PaddleOCR库，请运行: pip install paddlepaddle paddleocr")
-            return None
-        
-        try:
-            from PIL import ImageFont, ImageDraw, ImageEnhance
-            from skimage.morphology import skeletonize
-            import warnings
-            warnings.filterwarnings("ignore")
-            
-            # 初始化PaddleOCR（支持中英文）
-            self.status_label.config(text="正在初始化OCR...", foreground='blue')
-            self.root.update()
-            
-            # 使用PaddleOCR，启用方向分类器
-            ocr = PaddleOCR(use_angle_cls=True, lang='ch')
-            
-            # 图像预处理：提高识别精度
-            self.status_label.config(text="正在预处理图像...", foreground='blue')
-            self.root.update()
-            
-            # 记录原始尺寸
-            h, w = img.shape[:2]
-            
-            # 转换为RGB图像
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-            
-            # 放大小图像以提高识别率
-            min_size = 800
-            if max(h, w) < min_size:
-                scale_factor = min_size / max(h, w)
-                new_w = int(w * scale_factor)
-                new_h = int(h * scale_factor)
-                pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            else:
-                scale_factor = 1.0
-            
-            # 增强对比度
-            enhancer = ImageEnhance.Contrast(pil_img)
-            pil_img = enhancer.enhance(1.3)
-            
-            # 增强锐度
-            enhancer = ImageEnhance.Sharpness(pil_img)
-            pil_img = enhancer.enhance(1.5)
-            
-            img_enhanced = np.array(pil_img)
-            
-            # OCR识别
-            self.status_label.config(text="正在识别文字...", foreground='blue')
-            self.root.update()
-            
-            results = ocr.ocr(img_enhanced)
-            
-            if not results or not results[0]:
-                messagebox.showwarning("警告", "未识别到文字")
-                return None
-            
-            # 创建与原图相同尺寸的白色图像
-            output_img = Image.new('L', (w, h), 255)
-            draw = ImageDraw.Draw(output_img)
-            
-            # 字体映射
-            font_name = self.ocr_font_var.get()
-            font_map = {
-                'simhei': 'C:/Windows/Fonts/simhei.ttf',
-                'simsun': 'C:/Windows/Fonts/simsun.ttc',
-                'msyh': 'C:/Windows/Fonts/msyh.ttc',
-                'arial': 'C:/Windows/Fonts/arial.ttf',
-                'times': 'C:/Windows/Fonts/times.ttf',
-            }
-            
-            self.status_label.config(text="正在重绘文字...", foreground='blue')
-            self.root.update()
-            
-            # 绘制每个识别到的文字
-            for line in results[0]:
-                try:
-                    # PaddleOCR返回格式可能是: [bbox, (text, confidence)]
-                    bbox = line[0]
-                    text_info = line[1]
-                    
-                    # 解析文字和置信度
-                    if isinstance(text_info, (tuple, list)) and len(text_info) >= 2:
-                        text = str(text_info[0])
-                        try:
-                            confidence = float(text_info[1])
-                        except:
-                            confidence = 0.9  # 默认置信度
-                    elif isinstance(text_info, str):
-                        text = text_info
-                        confidence = 0.9
-                    else:
-                        text = str(text_info)
-                        confidence = 0.9
-                except:
-                    continue
-                
-                if not text or len(text.strip()) == 0:
-                    continue
-                
-                # 获取边界框坐标（还原到原始尺寸）
-                pts = np.array(bbox, dtype=np.float32) / scale_factor
-                x_coords = [p[0] for p in pts]
-                y_coords = [p[1] for p in pts]
-                x1, x2 = int(min(x_coords)), int(max(x_coords))
-                y1, y2 = int(min(y_coords)), int(max(y_coords))
-                
-                # 计算文字大小（基于边界框高度）
-                text_height = y2 - y1
-                text_width = x2 - x1
-                
-                # 根据文字长度和宽度计算字体大小
-                chars = len(text)
-                if chars > 0:
-                    char_width = text_width / chars
-                    font_size = max(12, int(min(text_height * 0.9, char_width * 1.2)))
-                else:
-                    font_size = max(12, int(text_height * 0.85))
-                
-                # 加载字体
-                font = None
-                font_path = font_map.get(font_name.lower())
-                if font_path:
-                    try:
-                        font = ImageFont.truetype(font_path, font_size)
-                    except:
-                        pass
-                
-                if font is None:
-                    for path in font_map.values():
-                        try:
-                            font = ImageFont.truetype(path, font_size)
-                            break
-                        except:
-                            continue
-                
-                if font is None:
-                    font = ImageFont.load_default()
-                
-                # 绘制文字（黑色字在白色背景）
-                draw.text((x1, y1), text, font=font, fill=0)
-            
-            # 转换为OpenCV图像
-            output_cv = np.array(output_img)
-            
-            # 二值化
-            _, binary = cv2.threshold(output_cv, 128, 255, cv2.THRESH_BINARY_INV)
-            
-            # 骨架化文字
-            self.status_label.config(text="正在骨架化...", foreground='blue')
-            self.root.update()
-            
-            skeleton = skeletonize(binary > 0)
-            skeleton_img = (skeleton * 255).astype(np.uint8)
-            
-            # 同时对原图做边缘检测，保留其他内容
-            self.status_label.config(text="正在提取其他轮廓...", foreground='blue')
-            self.root.update()
-            
-            # 边缘检测原图
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 50, 150)
-            
-            # 合并文字骨架和边缘检测结果
-            combined = cv2.bitwise_or(skeleton_img, edges)
-            
-            # 返回合并后的图像
-            return combined
-            
-        except ImportError:
-            messagebox.showerror("错误", "请安装 scikit-image: pip install scikit-image")
-            return None
-        except Exception as e:
-            messagebox.showerror("错误", f"OCR处理失败: {str(e)}")
-            return None
-    
+
     def process_image(self):
         # 判断要处理的图像
         if self.original_image is None:
@@ -2047,6 +1897,11 @@ class GCodeApp:
         
         # 获取旋转后的原图
         rotated_img = self._get_rotated_image()
+        if rotated_img is None:
+            messagebox.showerror("错误", "无法获取旋转后的图像")
+            return
+
+        rotated_h, rotated_w = rotated_img.shape[:2]
         
         # 记录框选区域的偏移量（用于坐标转换）
         offset_x_px = 0
@@ -2061,6 +1916,10 @@ class GCodeApp:
         else:
             # 没有框选区域，处理整个图像
             img_to_process = rotated_img
+
+        crop_flag = bool(self.crop_region)
+        img_h, img_w = img_to_process.shape[:2]
+        self.debug_log(f"处理图像: rotated=({rotated_w}x{rotated_h}) crop={crop_flag} region={self.crop_region} img=({img_w}x{img_h}) ocr={self.ocr_mode_var.get()}")
         
         try:
             # 检查是否启用OCR模式
@@ -2069,6 +1928,12 @@ class GCodeApp:
                 skeleton_img = self._process_ocr_image(img_to_process)
                 if skeleton_img is None:
                     return
+
+                try:
+                    nonzero = int(np.count_nonzero(skeleton_img))
+                except:
+                    nonzero = -1
+                self.debug_log(f"OCR结果图: skeleton_nonzero={nonzero}")
                 
                 # 从骨架图提取轮廓
                 contours_cv, _ = cv2.findContours(skeleton_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
@@ -2090,6 +1955,10 @@ class GCodeApp:
                     
                     if len(points) >= 2:
                         new_contours.append(points)
+
+                new_points = sum(len(c) for c in new_contours)
+                total_points = sum(len(c) for c in self.contours) + new_points
+                self.debug_log(f"轮廓提取: new_contours={len(new_contours)} new_points={new_points} total_contours={len(self.contours)+len(new_contours)} total_points={total_points}")
                 
                 # 追加到现有轮廓
                 self.contours.extend(new_contours)
@@ -2123,6 +1992,7 @@ class GCodeApp:
                 
                 self.status_label.config(text=f"新增 {len(new_contours)} 个轮廓, 共 {len(self.contours)} 个", foreground='green')
             
+            self.center_contours_on_paper()
             self.gcode_lines = []  # 清空旧的GCode
             
             self.draw_paper()
@@ -2130,6 +2000,137 @@ class GCodeApp:
             
         except Exception as e:
             messagebox.showerror("错误", f"处理失败: {str(e)}")
+
+    def show_ocr_compare(self):
+        input_bgr = getattr(self, "_last_ocr_input_bgr", None)
+        output_skeleton = getattr(self, "_last_ocr_output_skeleton", None)
+        if input_bgr is None or output_skeleton is None:
+            messagebox.showwarning("提示", "请先在 OCR 模式下点击“处理图像”，再打开对比。")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("原图 vs OCR结果")
+        win.geometry("1200x700")
+
+        toolbar = ttk.Frame(win)
+        toolbar.pack(fill=tk.X, padx=8, pady=6)
+
+        scale_var = tk.DoubleVar(value=1.0)
+        info_var = tk.StringVar(value="")
+
+        def _clamp_scale(v):
+            try:
+                v = float(v)
+            except Exception:
+                v = 1.0
+            return max(0.05, min(8.0, v))
+
+        def _np_bgr_to_pil_rgb(arr_bgr):
+            rgb = cv2.cvtColor(arr_bgr, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(rgb)
+
+        def _np_skeleton_to_pil(arr):
+            a = arr
+            if a is None:
+                return None
+            if len(a.shape) == 3:
+                a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+            a = a.astype(np.uint8)
+            return Image.fromarray(255 - a, mode="L")
+
+        left_src = _np_bgr_to_pil_rgb(input_bgr)
+        right_src = _np_skeleton_to_pil(output_skeleton)
+
+        panes = ttk.Panedwindow(win, orient=tk.HORIZONTAL)
+        panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        left_frame = ttk.Frame(panes)
+        right_frame = ttk.Frame(panes)
+        panes.add(left_frame, weight=1)
+        panes.add(right_frame, weight=1)
+
+        def _make_view(parent, title):
+            header = ttk.Frame(parent)
+            header.pack(fill=tk.X)
+            ttk.Label(header, text=title).pack(side=tk.LEFT)
+
+            body = ttk.Frame(parent)
+            body.pack(fill=tk.BOTH, expand=True)
+
+            ybar = ttk.Scrollbar(body, orient=tk.VERTICAL)
+            xbar = ttk.Scrollbar(body, orient=tk.HORIZONTAL)
+            canvas = tk.Canvas(body, bg="white", highlightthickness=0, yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+            ybar.config(command=canvas.yview)
+            xbar.config(command=canvas.xview)
+
+            ybar.pack(side=tk.RIGHT, fill=tk.Y)
+            xbar.pack(side=tk.BOTTOM, fill=tk.X)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+            return canvas
+
+        left_canvas = _make_view(left_frame, "原图（OCR输入）")
+        right_canvas = _make_view(right_frame, "识别后（骨架结果）")
+
+        def _render():
+            s = _clamp_scale(scale_var.get())
+            scale_var.set(s)
+
+            lw, lh = left_src.size
+            rw, rh = right_src.size
+
+            left_img = left_src.resize((max(1, int(lw * s)), max(1, int(lh * s))), Image.Resampling.NEAREST)
+            right_img = right_src.resize((max(1, int(rw * s)), max(1, int(rh * s))), Image.Resampling.NEAREST)
+
+            left_photo = ImageTk.PhotoImage(left_img)
+            right_photo = ImageTk.PhotoImage(right_img)
+
+            left_canvas.delete("all")
+            right_canvas.delete("all")
+
+            left_canvas.create_image(0, 0, image=left_photo, anchor=tk.NW)
+            right_canvas.create_image(0, 0, image=right_photo, anchor=tk.NW)
+
+            left_canvas.image = left_photo
+            right_canvas.image = right_photo
+
+            left_canvas.config(scrollregion=(0, 0, left_img.width, left_img.height))
+            right_canvas.config(scrollregion=(0, 0, right_img.width, right_img.height))
+
+            nonzero = int(np.count_nonzero(output_skeleton)) if output_skeleton is not None else 0
+            info_var.set(f"缩放 {s:.2f} | 原图 {lw}×{lh} | 结果 {rw}×{rh} | 骨架非零 {nonzero}")
+
+        def _zoom_by(factor):
+            scale_var.set(_clamp_scale(scale_var.get() * factor))
+            _render()
+
+        def _fit():
+            self.root.update_idletasks()
+            cw = max(1, min(left_canvas.winfo_width(), right_canvas.winfo_width()))
+            ch = max(1, min(left_canvas.winfo_height(), right_canvas.winfo_height()))
+            lw, lh = left_src.size
+            rw, rh = right_src.size
+            s1 = min(cw / max(1, lw), ch / max(1, lh))
+            s2 = min(cw / max(1, rw), ch / max(1, rh))
+            scale_var.set(_clamp_scale(min(s1, s2)))
+            _render()
+
+        ttk.Button(toolbar, text="缩小", width=8, command=lambda: _zoom_by(0.8)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="放大", width=8, command=lambda: _zoom_by(1.25)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="适配", width=8, command=_fit).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text="1:1", width=8, command=lambda: (scale_var.set(1.0), _render())).pack(side=tk.LEFT, padx=2)
+        ttk.Label(toolbar, textvariable=info_var).pack(side=tk.RIGHT)
+
+        def _wheel(event):
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                return
+            _zoom_by(1.1 if delta > 0 else 0.9)
+
+        left_canvas.bind("<MouseWheel>", _wheel)
+        right_canvas.bind("<MouseWheel>", _wheel)
+
+        win.after(50, _fit)
     
     def process_engineering_thinning(self):
         """工程化单线化处理：将图像转换为单像素细线"""
@@ -2145,6 +2146,15 @@ class GCodeApp:
             return
         
         try:
+            if self.contours:
+                self.contours = []
+                self.gcode_lines = []
+                self.selected_object = None
+                self.contour_bounds = None
+                self.image_rotation = 0
+                self.image_rotation_var.set(0)
+                self.image_rotation_label.config(text="0°")
+
             # 获取旋转后的原图
             rotated_img = self._get_rotated_image()
             
@@ -2189,7 +2199,7 @@ class GCodeApp:
             
             # === 步骤3: 检测文字区域（可选） ===
             text_mask = None
-            if text_sensitivity > 0 and OCR_AVAILABLE:
+            if text_sensitivity > 0 and self._ocr_is_available():
                 self.status_label.config(text="正在检测文字区域...", foreground='blue')
                 self.root.update()
                 text_mask = self._detect_text_regions(img_to_process, text_sensitivity)
@@ -2257,6 +2267,7 @@ class GCodeApp:
             self.image_mm_width = w_full * 0.1
             self.image_mm_height = h_full * 0.1
             
+            self.center_contours_on_paper()
             self.gcode_lines = []  # 清空旧的GCode
             
             self.status_label.config(
@@ -2272,53 +2283,182 @@ class GCodeApp:
             traceback.print_exc()
             messagebox.showerror("错误", f"单线化处理失败: {str(e)}")
     
+    def _ocr_is_available(self):
+        if getattr(self, '_ocr_import_failed', False):
+            return False
+        try:
+            __import__('rapidocr_onnxruntime', fromlist=['RapidOCR'])
+            return True
+        except ImportError:
+            self._ocr_import_failed = True
+            return False
+
+    def _get_ocr_engine(self, show_error=True):
+        if getattr(self, '_ocr_engine', None) is not None:
+            return self._ocr_engine
+        if getattr(self, '_ocr_engine_init_failed', False):
+            return None
+
+        RapidOCR = None
+        try:
+            mod = __import__('rapidocr_onnxruntime', fromlist=['RapidOCR'])
+            RapidOCR = getattr(mod, 'RapidOCR', None)
+        except ImportError:
+            RapidOCR = None
+
+        if RapidOCR is None:
+            self._ocr_engine_init_failed = True
+            if show_error:
+                messagebox.showerror("OCR不可用", "未安装 RapidOCR，请运行:\n\npip install rapidocr-onnxruntime")
+            return None
+
+        try:
+            self._ocr_engine = RapidOCR()
+            return self._ocr_engine
+        except Exception as e:
+            import traceback
+            self._ocr_engine_init_failed = True
+            if show_error:
+                messagebox.showerror(
+                    "OCR初始化失败",
+                    "RapidOCR 初始化失败：\n\n"
+                    f"{type(e).__name__}: {e}\n\n"
+                    "详细信息：\n"
+                    f"{traceback.format_exc()}",
+                )
+            return None
+
+    def _ocr_normalize_bbox(self, bbox):
+        if bbox is None:
+            return None
+        if isinstance(bbox, np.ndarray):
+            try:
+                bbox = bbox.tolist()
+            except:
+                return None
+        if not isinstance(bbox, (list, tuple)):
+            return None
+
+        if len(bbox) == 4 and all(isinstance(v, (int, float, np.integer, np.floating)) for v in bbox):
+            x1, y1, x2, y2 = bbox
+            return [[float(x1), float(y1)], [float(x2), float(y1)], [float(x2), float(y2)], [float(x1), float(y2)]]
+
+        if len(bbox) == 8 and all(isinstance(v, (int, float, np.integer, np.floating)) for v in bbox):
+            return [[float(bbox[0]), float(bbox[1])], [float(bbox[2]), float(bbox[3])], [float(bbox[4]), float(bbox[5])], [float(bbox[6]), float(bbox[7])]]
+
+        if len(bbox) != 4:
+            return None
+
+        pts = []
+        for p in bbox:
+            if isinstance(p, np.ndarray):
+                try:
+                    p = p.tolist()
+                except:
+                    return None
+            if not isinstance(p, (list, tuple)) or len(p) != 2:
+                return None
+            x, y = p[0], p[1]
+            if not isinstance(x, (int, float, np.integer, np.floating)) or not isinstance(y, (int, float, np.integer, np.floating)):
+                return None
+            pts.append([float(x), float(y)])
+        return pts
+
+    def _ocr_extract_items(self, result):
+        if not result:
+            return []
+        if isinstance(result, (tuple, list)) and len(result) == 2:
+            result = result[0]
+        if isinstance(result, np.ndarray):
+            try:
+                result = result.tolist()
+            except:
+                return []
+        if not isinstance(result, list):
+            return []
+
+        items = []
+        for it in result:
+            if not isinstance(it, (list, tuple)) or len(it) < 1:
+                continue
+            bbox = self._ocr_normalize_bbox(it[0] if len(it) >= 1 else None)
+            if bbox is None:
+                continue
+            text = ""
+            if len(it) >= 2 and it[1] is not None:
+                try:
+                    text = str(it[1])
+                except:
+                    text = ""
+            confidence = None
+            if len(it) >= 3:
+                v = it[2]
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    confidence = float(v)
+                elif isinstance(v, str):
+                    try:
+                        confidence = float(v)
+                    except:
+                        confidence = None
+            items.append((bbox, text, confidence))
+        return items
+
+    def _ocr_call(self, engine, img_bgr):
+        try:
+            return engine(img_bgr, use_det=True, use_cls=False, use_rec=True)
+        except TypeError:
+            return engine(img_bgr)
+
     def _detect_text_regions(self, img, sensitivity=0.5):
         """检测图像中的文字区域，返回文字区域的掩码"""
         h, w = img.shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:
-            # 使用PaddleOCR检测文字
-            ocr = PaddleOCR(use_angle_cls=True, lang='ch', show_log=False)
+            ocr = self._get_ocr_engine(show_error=False)
+            if ocr is None:
+                return mask
             
-            # 转换为RGB
-            if len(img.shape) == 3:
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            else:
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            h0, w0 = img.shape[:2]
+            min_size = 2400
+            scale_factor = 1.0
+            img_for_ocr = img
+            if max(h0, w0) < min_size:
+                scale_factor = min_size / max(h0, w0)
+                img_for_ocr = cv2.resize(
+                    img,
+                    (int(w0 * scale_factor), int(h0 * scale_factor)),
+                    interpolation=cv2.INTER_CUBIC
+                )
+
+            if len(img_for_ocr.shape) == 2:
+                img_for_ocr = cv2.cvtColor(img_for_ocr, cv2.COLOR_GRAY2BGR)
+            elif img_for_ocr.shape[2] == 4:
+                img_for_ocr = cv2.cvtColor(img_for_ocr, cv2.COLOR_BGRA2BGR)
+
+            ocr_ret = self._ocr_call(ocr, img_for_ocr)
+
+            ocr_items = self._ocr_extract_items(ocr_ret)
+            if not ocr_items:
+                return mask
             
-            results = ocr.ocr(img_rgb, cls=True)
-            
-            if results and results[0]:
-                for line in results[0]:
-                    try:
-                        bbox = line[0]
-                        text_info = line[1]
-                        
-                        # 获取置信度
-                        if isinstance(text_info, (tuple, list)) and len(text_info) >= 2:
-                            confidence = float(text_info[1])
-                        else:
-                            confidence = 0.9
-                        
-                        # 根据灵敏度过滤
-                        if confidence < (1 - sensitivity):
-                            continue
-                        
-                        # 获取边界框
-                        pts = np.array(bbox, dtype=np.int32)
-                        
-                        # 扩展边界框
-                        x_coords = [p[0] for p in pts]
-                        y_coords = [p[1] for p in pts]
-                        x1, x2 = max(0, min(x_coords) - 5), min(w, max(x_coords) + 5)
-                        y1, y2 = max(0, min(y_coords) - 5), min(h, max(y_coords) + 5)
-                        
-                        # 填充文字区域
-                        cv2.fillPoly(mask, [pts], 255)
-                        
-                    except:
+            min_conf = max(0.0, min(1.0, 1.0 - float(sensitivity)))
+            for bbox, text, confidence in ocr_items:
+                try:
+                    keep = False
+                    if text and str(text).strip():
+                        keep = True
+                    if confidence is not None and confidence >= min_conf:
+                        keep = True
+                    if not keep:
                         continue
+
+                    pts = (np.array(bbox, dtype=np.float32) / float(scale_factor)).astype(np.int32)
+                    if pts.shape != (4, 2):
+                        continue
+                    cv2.fillPoly(mask, [pts], 255)
+                except:
+                    continue
         except:
             pass
         
@@ -2884,6 +3024,47 @@ class GCodeApp:
     
     def apply_position(self):
         self.draw_contours()
+
+    def center_contours_on_paper(self):
+        if not self.contours:
+            return
+        
+        try:
+            scale_factor = float(self.scale_var.get())
+        except ValueError:
+            return
+        
+        scale = scale_factor * 0.1
+        if scale == 0:
+            return
+        
+        min_x = None
+        max_x = None
+        min_y = None
+        max_y = None
+        
+        for contour in self.contours:
+            for px, py in contour:
+                if min_x is None:
+                    min_x = max_x = px
+                    min_y = max_y = py
+                else:
+                    min_x = min(min_x, px)
+                    max_x = max(max_x, px)
+                    min_y = min(min_y, py)
+                    max_y = max(max_y, py)
+        
+        if min_x is None:
+            return
+        
+        center_x_mm = ((min_x + max_x) / 2) * scale
+        center_y_mm = ((min_y + max_y) / 2) * scale
+        
+        offset_x = (self.paper_width / 2) - center_x_mm
+        offset_y = (self.paper_height / 2) - center_y_mm
+        
+        self.offset_x_var.set(f"{offset_x:.2f}")
+        self.offset_y_var.set(f"{offset_y:.2f}")
     
     def export_gcode(self):
         if not self.contours:
@@ -3068,6 +3249,7 @@ class GCodeApp:
             self.status_label.config(text=f"已生成文字骨架: {len(self.contours)}条路径", foreground='green')
             self.gcode_lines = []
             
+            self.center_contours_on_paper()
             self.draw_paper()
             self.notebook.select(1)
             
@@ -3460,69 +3642,133 @@ class GCodeApp:
         ###
 
     def _process_ocr_image(self, img):
-        """工业级稳定版：OCR → 重绘 → 骨架化（永不因 OCR 输出崩溃）"""
-        if not OCR_AVAILABLE:
-            messagebox.showerror(
-                "错误",
-                "未安装 PaddleOCR，请运行:\n\npip install paddlepaddle paddleocr"
-            )
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            from skimage.morphology import skeletonize, thin
+        except ImportError as e:
+            messagebox.showerror("依赖缺失", str(e))
             return None
 
         try:
-            from PIL import Image, ImageDraw, ImageFont, ImageEnhance
-            from skimage.morphology import skeletonize
-            import warnings
-            warnings.filterwarnings("ignore")
-
-            # ------------------------------
-            # 1. 初始化 OCR
-            # ------------------------------
             self.status_label.config(text="初始化 OCR...", foreground='blue')
             self.root.update()
 
-            ocr = PaddleOCR(use_angle_cls=True, lang='ch')
-
-            # ------------------------------
-            # 2. 图像预处理
-            # ------------------------------
-            self.status_label.config(text="图像预处理...", foreground='blue')
-            self.root.update()
-
-            h, w = img.shape[:2]
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            pil_img = Image.fromarray(img_rgb)
-
-            # 放大过小图片
-            min_size = 800
-            scale_factor = 1.0
-            if max(h, w) < min_size:
-                scale_factor = min_size / max(h, w)
-                pil_img = pil_img.resize(
-                    (int(w * scale_factor), int(h * scale_factor)),
-                    Image.Resampling.LANCZOS
-                )
-
-            # 增强
-            pil_img = ImageEnhance.Contrast(pil_img).enhance(1.3)
-            pil_img = ImageEnhance.Sharpness(pil_img).enhance(1.5)
-
-            img_enhanced = np.array(pil_img)
-
-            # ------------------------------
-            # 3. OCR 识别
-            # ------------------------------
-            self.status_label.config(text="OCR 识别中...", foreground='blue')
-            self.root.update()
-
-            ocr_result = ocr.ocr(img_enhanced)
-
-            if not ocr_result or not ocr_result[0]:
-                messagebox.showwarning("提示", "未识别到文字")
+            ocr = self._get_ocr_engine(show_error=True)
+            if ocr is None:
                 return None
 
-            # ------------------------------
-            # 4. 创建输出画布
-            # ------------------------------
+            if img is None:
+                return None
+
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            elif img.shape[2] == 4:
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+            h, w = img.shape[:2]
+            self.debug_log(f"OCR输入: img=({w}x{h})")
+
+            min_size = 2400
+            scale_factor = 1.0
+            img_for_ocr = img
+            if max(h, w) < min_size:
+                scale_factor = float(min_size) / float(max(h, w))
+                img_for_ocr = cv2.resize(
+                    img,
+                    (int(w * scale_factor), int(h * scale_factor)),
+                    interpolation=cv2.INTER_CUBIC
+                )
+            self.debug_log(f"OCR预处理: scale_factor={scale_factor:.4f}")
+
+            variants = [("原图", img_for_ocr)]
+            try:
+                gray = cv2.cvtColor(img_for_ocr, cv2.COLOR_BGR2GRAY)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                gray = clahe.apply(gray)
+                gray = cv2.GaussianBlur(gray, (3, 3), 0)
+                variants.append(("增强灰度", cv2.cvtColor(cv2.convertScaleAbs(gray, alpha=1.8, beta=0), cv2.COLOR_GRAY2BGR)))
+
+                binary = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 31, 10
+                )
+                variants.append(("自适应二值", cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)))
+                variants.append(("自适应反色", cv2.cvtColor(255 - binary, cv2.COLOR_GRAY2BGR)))
+            except:
+                pass
+
+            try:
+                kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+                sharpened = cv2.filter2D(img_for_ocr, -1, kernel)
+                variants.append(("锐化", sharpened))
+            except:
+                pass
+
+            chosen_variant = None
+            ocr_items = []
+            for variant_name, img_variant in variants:
+                self.status_label.config(text=f"OCR 识别中（{variant_name}）...", foreground='blue')
+                self.root.update()
+
+                ocr_ret = None
+                try:
+                    ocr_ret = self._ocr_call(ocr, img_variant)
+                except:
+                    ocr_ret = None
+
+                ocr_items = self._ocr_extract_items(ocr_ret)
+                self.debug_log(f"OCR返回: variant={variant_name} items={len(ocr_items)}")
+                if ocr_items:
+                    chosen_variant = variant_name
+                    break
+
+            if not ocr_items:
+                self.status_label.config(text="OCR未识别到文字，进行单线化提取...", foreground='orange')
+                self.root.update()
+                self.debug_log("OCR返回为空: 进入单线化fallback")
+
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                try:
+                    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                    gray = clahe.apply(gray)
+                except:
+                    pass
+                gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+                binary_inv = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY_INV, 21, 8
+                )
+                binary_norm = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY, 21, 8
+                )
+
+                inv_ratio = float(np.count_nonzero(binary_inv)) / float(binary_inv.size)
+                norm_ratio = float(np.count_nonzero(binary_norm == 0)) / float(binary_norm.size)
+                binary = binary_inv if inv_ratio < norm_ratio else (255 - binary_norm)
+
+                kernel = np.ones((2, 2), np.uint8)
+                binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+                min_keep = max(20, int(binary.size * 0.00002))
+                binary = self._remove_small_components(binary, min_keep)
+
+                skeleton_img = (thin(binary > 0).astype(np.uint8) * 255)
+                nonzero = int(np.count_nonzero(skeleton_img))
+                self.debug_log(f"fallback结果: skeleton_nonzero={nonzero}")
+
+                if nonzero == 0:
+                    messagebox.showwarning("提示", "未识别到文字，骨架化也没有提取到有效笔画。")
+                    return None
+                try:
+                    self._last_ocr_input_bgr = img.copy()
+                    self._last_ocr_text_binary = None
+                    self._last_ocr_base_binary = binary.copy()
+                    self._last_ocr_output_skeleton = skeleton_img.copy()
+                except:
+                    pass
+                return skeleton_img
+
             output_img = Image.new('L', (w, h), 255)
             draw = ImageDraw.Draw(output_img)
 
@@ -3533,113 +3779,214 @@ class GCodeApp:
                 'arial': 'C:/Windows/Fonts/arial.ttf',
                 'times': 'C:/Windows/Fonts/times.ttf',
             }
-
             font_name = self.ocr_font_var.get().lower()
             font_path = font_map.get(font_name)
+
+            def _load_font(font_size):
+                try:
+                    if font_path:
+                        return ImageFont.truetype(font_path, int(font_size))
+                except:
+                    pass
+                for p in font_map.values():
+                    try:
+                        return ImageFont.truetype(p, int(font_size))
+                    except:
+                        continue
+                return ImageFont.load_default()
+
+            def _fit_font_size(text, target_w, target_h):
+                if target_w <= 1 or target_h <= 1:
+                    return 1
+                lo = 1
+                hi = min(600, max(8, int(target_h * 3)))
+                best = 1
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    font = _load_font(mid)
+                    tb = draw.textbbox((0, 0), text, font=font)
+                    tw = tb[2] - tb[0]
+                    th = tb[3] - tb[1]
+                    if tw <= target_w and th <= target_h:
+                        best = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                return best
 
             self.status_label.config(text="重绘文字...", foreground='blue')
             self.root.update()
 
-            # ------------------------------
-            # 5. 安全解析并绘制 OCR 行
-            # ------------------------------
-            for idx, line in enumerate(ocr_result[0]):
+            filtered_ocr_items = []
+            for bbox, text, _confidence in ocr_items:
                 try:
-                    # ---------- 解析 bbox ----------
-                    bbox = line[0]
-                    pts = np.array(bbox, dtype=np.float32) / scale_factor
+                    if not text or not str(text).strip():
+                        continue
+                    parts = re.findall(r"[A-Za-z\u4e00-\u9fff]+", str(text))
+                    if not parts:
+                        continue
+                    filtered_text = "".join(parts)
+                    if not filtered_text:
+                        continue
+                    filtered_ocr_items.append((bbox, filtered_text))
+                except:
+                    continue
 
-                    x_coords = pts[:, 0]
-                    y_coords = pts[:, 1]
-                    x1, x2 = int(x_coords.min()), int(x_coords.max())
-                    y1, y2 = int(y_coords.min()), int(y_coords.max())
+            def _tokenize_zh_en(s):
+                tokens = []
+                buf = []
+                for ch in s:
+                    if 'A' <= ch <= 'Z' or 'a' <= ch <= 'z':
+                        buf.append(ch)
+                        continue
+                    if buf:
+                        tokens.append(''.join(buf))
+                        buf = []
+                    if '\u4e00' <= ch <= '\u9fff':
+                        tokens.append(ch)
+                if buf:
+                    tokens.append(''.join(buf))
+                return tokens
 
+            draw_jobs = []
+            for bbox, text in filtered_ocr_items:
+                try:
+                    pts = (np.array(bbox, dtype=np.float32) / float(scale_factor))
+                    x1 = int(np.floor(np.min(pts[:, 0])))
+                    x2 = int(np.ceil(np.max(pts[:, 0])))
+                    y1 = int(np.floor(np.min(pts[:, 1])))
+                    y2 = int(np.ceil(np.max(pts[:, 1])))
+
+                    x1 = max(0, min(x1, w - 1))
+                    y1 = max(0, min(y1, h - 1))
+                    x2 = max(0, min(x2, w))
+                    y2 = max(0, min(y2, h))
                     if x2 <= x1 or y2 <= y1:
                         continue
 
-                    # ---------- 解析 text / confidence（防御性） ----------
-                    text = ""
-                    confidence = 0.9
-
-                    text_info = line[1]
-
-                    if isinstance(text_info, (list, tuple)):
-                        if len(text_info) >= 1:
-                            text = str(text_info[0])
-
-                        if len(text_info) >= 2 and isinstance(text_info[1], (int, float)):
-                            confidence = float(text_info[1])
-                    elif isinstance(text_info, str):
-                        text = text_info
-                    else:
-                        text = str(text_info)
-
-                    if not text.strip():
+                    tokens = _tokenize_zh_en(text)
+                    if len(tokens) <= 1:
+                        draw_jobs.append((x1, y1, x2, y2, text))
                         continue
 
-                    # ---------- 字体大小估算 ----------
-                    box_h = y2 - y1
                     box_w = x2 - x1
-                    char_count = max(len(text), 1)
+                    box_h = y2 - y1
+                    horizontal = box_w >= box_h
+                    nominal = int(max(10, min(200, min(box_w, box_h) * 0.9)))
+                    nominal_font = _load_font(nominal)
+                    weights = []
+                    for t in tokens:
+                        try:
+                            tb = draw.textbbox((0, 0), t, font=nominal_font)
+                            tw = max(1, tb[2] - tb[0])
+                            th = max(1, tb[3] - tb[1])
+                            weights.append(tw if horizontal else th)
+                        except:
+                            weights.append(1)
+                    total_w = float(sum(weights)) if weights else 1.0
 
-                    est_char_w = box_w / char_count
-                    font_size = max(
-                        12,
-                        int(min(box_h * 0.9, est_char_w * 1.3))
-                    )
-
-                    # ---------- 加载字体（永不失败） ----------
-                    font = None
-                    try:
-                        if font_path:
-                            font = ImageFont.truetype(font_path, font_size)
-                    except:
-                        font = None
-
-                    if font is None:
-                        for p in font_map.values():
-                            try:
-                                font = ImageFont.truetype(p, font_size)
-                                break
-                            except:
-                                continue
-
-                    if font is None:
-                        font = ImageFont.load_default()
-
-                    # ---------- 绘制 ----------
-                    draw.text((x1, y1), text, font=font, fill=0)
-
-                except Exception as e:
-                    # 单行 OCR 出错，直接跳过，绝不影响整体
-                    print(f"[OCR WARN] line {idx} skipped: {e}")
+                    if horizontal:
+                        cursor = x1
+                        for t, wt in zip(tokens, weights):
+                            seg = int(round(box_w * (float(wt) / total_w)))
+                            seg = max(1, seg)
+                            nx1 = cursor
+                            nx2 = min(x2, cursor + seg)
+                            if nx2 > nx1:
+                                draw_jobs.append((nx1, y1, nx2, y2, t))
+                            cursor = nx2
+                        if cursor < x2 and draw_jobs:
+                            lx1, ly1, lx2, ly2, lt = draw_jobs[-1]
+                            if ly1 == y1 and ly2 == y2 and lx2 <= x2:
+                                draw_jobs[-1] = (lx1, ly1, x2, ly2, lt)
+                    else:
+                        cursor = y1
+                        for t, wt in zip(tokens, weights):
+                            seg = int(round(box_h * (float(wt) / total_w)))
+                            seg = max(1, seg)
+                            ny1 = cursor
+                            ny2 = min(y2, cursor + seg)
+                            if ny2 > ny1:
+                                draw_jobs.append((x1, ny1, x2, ny2, t))
+                            cursor = ny2
+                        if cursor < y2 and draw_jobs:
+                            lx1, ly1, lx2, ly2, lt = draw_jobs[-1]
+                            if lx1 == x1 and lx2 == x2 and ly2 <= y2:
+                                draw_jobs[-1] = (lx1, ly1, lx2, y2, lt)
+                except:
                     continue
 
-            # ------------------------------
-            # 6. 二值化 + 骨架化
-            # ------------------------------
+            drawn = 0
+            for x1, y1, x2, y2, text in draw_jobs:
+                try:
+                    box_w = x2 - x1
+                    box_h = y2 - y1
+                    font_size = _fit_font_size(text, box_w, box_h)
+                    font = _load_font(font_size)
+                    tb = draw.textbbox((0, 0), text, font=font)
+                    tw = tb[2] - tb[0]
+                    th = tb[3] - tb[1]
+                    draw_x = int(x1 + (box_w - tw) / 2 - tb[0])
+                    draw_y = int(y1 + (box_h - th) / 2 - tb[1])
+                    draw.text((draw_x, draw_y), text, font=font, fill=0)
+                    drawn += 1
+                except:
+                    continue
+
+            self.debug_log(f"OCR绘制: variant={chosen_variant} items={len(filtered_ocr_items)} drawn={drawn}")
+
             output_cv = np.array(output_img)
-            _, binary = cv2.threshold(
-                output_cv, 128, 255, cv2.THRESH_BINARY_INV
-            )
+            _, text_binary = cv2.threshold(output_cv, 128, 255, cv2.THRESH_BINARY_INV)
+            try:
+                text_mask_margin_px = 1
+                k = int(text_mask_margin_px) * 2 + 1
+                text_mask = cv2.dilate(text_binary, np.ones((k, k), np.uint8), iterations=1)
+            except:
+                text_mask = text_binary.copy()
 
             self.status_label.config(text="文字骨架化...", foreground='blue')
             self.root.update()
 
-            skeleton = skeletonize(binary > 0)
-            skeleton_img = (skeleton * 255).astype(np.uint8)
+            text_skeleton_img = (skeletonize(text_binary > 0).astype(np.uint8) * 255)
 
-            # ------------------------------
-            # 7. 原图边缘融合
-            # ------------------------------
-            self.status_label.config(text="提取原图轮廓...", foreground='blue')
+            self.status_label.config(text="单线化未识别区域...", foreground='blue')
             self.root.update()
 
-            return skeleton_img
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        except ImportError as e:
-            messagebox.showerror("依赖缺失", str(e))
-            return None
+            binary_inv = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, 21, 8
+            )
+            binary_norm = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 21, 8
+            )
+            inv_ratio = float(np.count_nonzero(binary_inv)) / float(binary_inv.size)
+            norm_ratio = float(np.count_nonzero(binary_norm == 0)) / float(binary_norm.size)
+            base_binary = binary_inv if inv_ratio < norm_ratio else (255 - binary_norm)
+
+            kernel = np.ones((2, 2), np.uint8)
+            base_binary = cv2.morphologyEx(base_binary, cv2.MORPH_OPEN, kernel, iterations=1)
+            min_keep = max(20, int(base_binary.size * 0.00002))
+            base_binary = self._remove_small_components(base_binary, min_keep)
+
+            exclude_mask = text_mask if np.any(text_mask > 0) else np.zeros_like(base_binary)
+            non_text_region = cv2.bitwise_and(base_binary, cv2.bitwise_not(exclude_mask))
+            non_text_thin_img = (thin(non_text_region > 0).astype(np.uint8) * 255)
+
+            combined = cv2.bitwise_or(text_skeleton_img, non_text_thin_img)
+            combined = self._remove_small_components(combined, min_keep)
+            self.debug_log(f"OCR合并结果: variant={chosen_variant} items={len(filtered_ocr_items)} skeleton_nonzero={int(np.count_nonzero(combined))}")
+            try:
+                self._last_ocr_input_bgr = img.copy()
+                self._last_ocr_text_binary = text_binary.copy()
+                self._last_ocr_base_binary = base_binary.copy()
+                self._last_ocr_output_skeleton = combined.copy()
+            except:
+                pass
+            return combined
 
         except Exception as e:
             messagebox.showerror("OCR处理失败", str(e))
