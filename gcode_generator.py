@@ -1227,7 +1227,6 @@ class GCodeApp:
         
         # 绑定Delete键删除选中对象
         self.root.bind('<Delete>', self.delete_selected_object)
-        self.root.bind('<BackSpace>', self.delete_selected_object)
         
         # 右下：控制台
         console_frame = ttk.LabelFrame(bottom_right, text="控制台")
@@ -1487,7 +1486,9 @@ class GCodeApp:
         
         # 如果有轮廓，总是重新生成GCode（使用最新位置参数）
         if self.contours:
-            self.generate_gcode_from_contours()
+            ok = self.generate_gcode_from_contours()
+            if not ok:
+                return
         elif not self.gcode_lines:
             messagebox.showwarning("警告", "没有GCode可发送，请先处理图像或加载GCode文件")
             return
@@ -1554,7 +1555,11 @@ class GCodeApp:
             z_down = float(self.z_down_var.get())
         except ValueError:
             messagebox.showerror("错误", "请输入有效的参数")
-            return
+            return False
+
+        if scale == 0:
+            messagebox.showerror("错误", "缩放比例不能为0")
+            return False
         
         # 获取高度补偿参数
         z_compensation = {'enabled': False}
@@ -1569,7 +1574,7 @@ class GCodeApp:
                 }
             except ValueError:
                 messagebox.showerror("错误", "请输入有效的高度补偿参数")
-                return
+                return False
         
         gcode_gen = GCodeGenerator(
             feed_rate, z_up, z_down, 
@@ -1577,12 +1582,40 @@ class GCodeApp:
             paper_width=self.paper_width,
             paper_height=self.paper_height
         )
+        contours_to_export = self.contours
+        image_rotation = getattr(self, 'image_rotation', 0)
+        if image_rotation != 0:
+            all_x = []
+            all_y = []
+            for contour in self.contours:
+                for point in contour:
+                    all_x.append(point[0] * scale)
+                    all_y.append(point[1] * scale)
+            if all_x and all_y:
+                center_x = (min(all_x) + max(all_x)) / 2 + offset_x
+                center_y = (min(all_y) + max(all_y)) / 2 + offset_y
+            else:
+                center_x = offset_x
+                center_y = offset_y
+            
+            rotated_contours = []
+            for contour in self.contours:
+                rotated_contour = []
+                for point in contour:
+                    mm_x = point[0] * scale + offset_x
+                    mm_y = point[1] * scale + offset_y
+                    rx, ry = self._rotate_point(mm_x, mm_y, center_x, center_y, image_rotation)
+                    rotated_contour.append(((rx - offset_x) / scale, (ry - offset_y) / scale))
+                rotated_contours.append(rotated_contour)
+            contours_to_export = rotated_contours
+        
         self.gcode_lines = gcode_gen.generate_from_contours(
-            self.contours, offset_x, offset_y, scale, self.paper_height
+            contours_to_export, offset_x, offset_y, scale, self.paper_height
         )
         
         comp_status = "（已启用高度补偿）" if z_compensation['enabled'] else ""
         self.status_label.config(text=f"已生成 {len(self.gcode_lines)} 行GCode{comp_status}")
+        return True
     
     def load_gcode_file(self):
         """加载GCode文件"""
@@ -1600,9 +1633,10 @@ class GCodeApp:
     
     def save_gcode(self):
         """导出GCode文件"""
-        # 如果有轮廓，先生成GCode
-        if self.contours and not self.gcode_lines:
-            self.generate_gcode_from_contours()
+        if self.contours:
+            ok = self.generate_gcode_from_contours()
+            if not ok:
+                return
         
         if not self.gcode_lines:
             messagebox.showwarning("警告", "没有GCode可导出，请先处理图像")
@@ -2868,6 +2902,10 @@ class GCodeApp:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的数值")
             return
+
+        if scale == 0:
+            messagebox.showerror("错误", "缩放比例不能为0")
+            return
         
         gcode_gen = GCodeGenerator(feed_rate, z_up, z_down)
         
@@ -2879,8 +2917,8 @@ class GCodeApp:
             all_y = []
             for contour in self.contours:
                 for point in contour:
-                    all_x.append(point[0] * 0.1 * scale)
-                    all_y.append(point[1] * 0.1 * scale)
+                    all_x.append(point[0] * scale)
+                    all_y.append(point[1] * scale)
             if all_x and all_y:
                 center_x = (min(all_x) + max(all_x)) / 2 + offset_x
                 center_y = (min(all_y) + max(all_y)) / 2 + offset_y
@@ -2893,11 +2931,11 @@ class GCodeApp:
             for contour in self.contours:
                 rotated_contour = []
                 for point in contour:
-                    mm_x = point[0] * 0.1 * scale + offset_x
-                    mm_y = point[1] * 0.1 * scale + offset_y
+                    mm_x = point[0] * scale + offset_x
+                    mm_y = point[1] * scale + offset_y
                     rx, ry = self._rotate_point(mm_x, mm_y, center_x, center_y, self.image_rotation)
                     # 转换回像素坐标
-                    rotated_contour.append(((rx - offset_x) / scale / 0.1, (ry - offset_y) / scale / 0.1))
+                    rotated_contour.append(((rx - offset_x) / scale, (ry - offset_y) / scale))
                 rotated_contours.append(rotated_contour)
             contours_to_export = rotated_contours
         
