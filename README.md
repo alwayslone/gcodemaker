@@ -1,3 +1,79 @@
-a gcode for write machine
+# GCodeMaker（图片/文字转GCode + GRBL控制器）
 
-Support the conversion between single-line and skeleton bars for both images and text.
+一个基于 Python + Tkinter 的桌面应用，用于把图片/文字转换成可用于写字机/绘图机的 GCode，并提供类似 LaserGRBL 的 GRBL 串口控制与实时发送能力。
+
+## 主要功能
+
+### 1) 图片 → 路径（轮廓/单线化）
+- 边缘检测（Canny）并提取轮廓路径
+- 支持“工程化单线化”：文字区域提取中轴骨架、非文字区域细线化
+- 支持框选区域处理（只处理选区内容）
+- 支持原图旋转（影响所有算法输入）
+
+### 2) 多套独立算法按钮（互不混用参数）
+- 工程化单线化：文字中轴骨架 + 非文字细线化
+- 算法一：Medial Axis（平滑 + 路径优化）
+- 算法二：二值化骨架 + Hough 检测长直线 + 用直线替换骨架段 + 曲线平滑
+- 算法三：改进 Potrace + 直线约束（轮廓提取 + 直线段约束）
+- 算法四：DeepSVG / Pix2Vector（导入SVG或调用外部命令生成SVG，再解析为路径）
+
+### 3) 画布预览与“PS风格”直接操作
+- 在纸张画布上预览路径
+- 轮廓/参照图可选中并移动、缩放、旋转（带控制点）
+- 支持纸张尺寸（A系/Letter/Legal/自定义）与方向（纵向/横向）
+
+### 4) Ground 参照功能（对照定位）
+- 加载参照图片并半透明叠加显示
+- 支持移动/缩放/旋转/锁定，便于和生成路径对齐
+
+### 5) GCode 生成与 GRBL 控制
+- 生成 GCode（毫米、绝对坐标等常用头部设置）
+- 串口连接 GRBL，支持状态查询、点动、回零、解锁、急停
+- 支持流式发送 GCode（按 GRBL 缓冲区字符计数协议发送）
+
+## 快速开始
+
+### 运行
+在项目目录下运行：
+
+```bash
+python gcodemaker-main/gcode_generator.py
+```
+
+### 基本使用流程
+1. 加载图片
+2. （可选）原图旋转、框选区域
+3. 选择一种处理方式：
+   - “处理图像”（边缘检测→轮廓）
+   - “工程化单线化处理”
+   - 算法一/二/三/四任一按钮
+4. 切到预览页调整位置/缩放/旋转
+5. 生成 GCode 并保存或直接串口发送到 GRBL
+
+## 算法说明（简要）
+- 工程化单线化：对文字区域更偏向“单线笔画”，对非文字区域更偏向“细线化”。
+- 算法一（Medial Axis）：对前景做中轴骨架，适合生成单线路径，并可做 B-spline 平滑与路径排序优化。
+- 算法二（骨架 + Hough）：骨架化后检测长直线并替换骨架段，直线更“直”，再对曲线段做平滑。
+- 算法三（改进 Potrace + 直线约束）：从二值图提取闭合轮廓，再按角度/距离容差把接近直线的段落压成直线。
+- 算法四（DeepSVG / Pix2Vector）：以 SVG 作为中间表示（可直接导入或调用外部命令生成），再解析为折线路径。
+
+## 依赖安装
+必需依赖（建议用虚拟环境）：
+
+```bash
+pip install numpy opencv-python pillow
+```
+
+可选依赖（部分功能用到才需要）：
+- GRBL 串口：`pip install pyserial`
+- 单线化/骨架/Medial Axis：`pip install scikit-image`
+- OCR（工程化单线化内部文字检测会用到）：`pip install rapidocr-onnxruntime`
+
+## 常见问题
+- 启动时报缺少 tkinter：需要安装带 Tk 的 Python（Windows 官方 Python 通常自带）。
+- 点击单线化/算法一/二报“请安装 scikit-image”：按上面的可选依赖安装即可。
+- 算法四无法生成 SVG：需要你配置“推理命令(可空)”，并确保命令模板里包含输入/输出占位符：
+  - 输入：`{in}` 或 `{input}`
+  - 输出：`{out}` 或 `{output}`
+
+##就是一坨用ai生成的狗屎,但是可以用

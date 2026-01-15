@@ -10,10 +10,14 @@ from PIL import Image, ImageTk, ImageFilter, ImageOps
 import numpy as np
 import cv2
 import os
+import sys
+import subprocess
+import tempfile
 import threading
 import queue
 import time
 import re
+import xml.etree.ElementTree as ET
 
 # 尝试导入串口库
 try:
@@ -977,6 +981,231 @@ class GCodeApp:
         
         # 处理按钮
         ttk.Button(thinning_frame, text="工程化单线化处理", command=self.process_engineering_thinning).pack(fill=tk.X, padx=5, pady=5)
+
+        algo1_frame = ttk.LabelFrame(image_scroll_frame, text="算法一：Medial Axis（平滑+路径优化）")
+        algo1_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        algo1_denoise_frame = ttk.Frame(algo1_frame)
+        algo1_denoise_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo1_denoise_frame, text="去噪强度:").pack(side=tk.LEFT)
+        self.ma_denoise_var = tk.IntVar(value=3)
+        self.ma_denoise_label = ttk.Label(algo1_denoise_frame, text="3", width=3)
+        self.ma_denoise_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo1_denoise_frame, from_=0, to=10, variable=self.ma_denoise_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.ma_denoise_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo1_minlen_frame = ttk.Frame(algo1_frame)
+        algo1_minlen_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo1_minlen_frame, text="最小线条长度:").pack(side=tk.LEFT)
+        self.ma_min_contour_len_var = tk.IntVar(value=10)
+        self.ma_min_contour_len_label = ttk.Label(algo1_minlen_frame, text="10px", width=6)
+        self.ma_min_contour_len_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo1_minlen_frame, from_=1, to=200, variable=self.ma_min_contour_len_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.ma_min_contour_len_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo1_simplify_frame = ttk.Frame(algo1_frame)
+        algo1_simplify_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo1_simplify_frame, text="轮廓简化:").pack(side=tk.LEFT)
+        self.ma_simplify_var = tk.DoubleVar(value=0.002)
+        ttk.Scale(algo1_simplify_frame, from_=0.0001, to=0.02, variable=self.ma_simplify_var,
+                  orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo1_smooth_frame = ttk.Frame(algo1_frame)
+        algo1_smooth_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo1_smooth_frame, text="B-spline平滑:").pack(side=tk.LEFT)
+        self.ma_bspline_iter_var = tk.IntVar(value=2)
+        self.ma_bspline_iter_label = ttk.Label(algo1_smooth_frame, text="2", width=3)
+        self.ma_bspline_iter_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo1_smooth_frame, from_=0, to=5, variable=self.ma_bspline_iter_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.ma_bspline_iter_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.ma_optimize_paths_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(algo1_frame, text="路径优化(减少空行程)", variable=self.ma_optimize_paths_var).pack(anchor=tk.W, padx=5, pady=2)
+        ttk.Button(algo1_frame, text="算法一：Medial Axis 处理", command=self.process_algo_medial_axis).pack(fill=tk.X, padx=5, pady=5)
+
+        algo2_frame = ttk.LabelFrame(image_scroll_frame, text="算法二：二值化骨架 + Hough直线替换 + 曲线平滑")
+        algo2_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        algo2_denoise_frame = ttk.Frame(algo2_frame)
+        algo2_denoise_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_denoise_frame, text="去噪强度:").pack(side=tk.LEFT)
+        self.hough2_denoise_var = tk.IntVar(value=3)
+        self.hough2_denoise_label = ttk.Label(algo2_denoise_frame, text="3", width=3)
+        self.hough2_denoise_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_denoise_frame, from_=0, to=10, variable=self.hough2_denoise_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_denoise_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_bin_frame = ttk.Frame(algo2_frame)
+        algo2_bin_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_bin_frame, text="二值化:").pack(side=tk.LEFT)
+        self.hough2_binarize_method_var = tk.StringVar(value='adaptive')
+        ttk.Combobox(algo2_bin_frame, textvariable=self.hough2_binarize_method_var, width=12, state='readonly',
+                     values=['adaptive', 'otsu', 'fixed']).pack(side=tk.RIGHT, padx=2)
+
+        algo2_bin_th_frame = ttk.Frame(algo2_frame)
+        algo2_bin_th_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_bin_th_frame, text="阈值(固定):").pack(side=tk.LEFT)
+        self.hough2_fixed_threshold_var = tk.IntVar(value=128)
+        self.hough2_fixed_threshold_label = ttk.Label(algo2_bin_th_frame, text="128", width=4)
+        self.hough2_fixed_threshold_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_bin_th_frame, from_=0, to=255, variable=self.hough2_fixed_threshold_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_fixed_threshold_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_minlen_frame = ttk.Frame(algo2_frame)
+        algo2_minlen_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_minlen_frame, text="最小线条长度:").pack(side=tk.LEFT)
+        self.hough2_min_contour_len_var = tk.IntVar(value=10)
+        self.hough2_min_contour_len_label = ttk.Label(algo2_minlen_frame, text="10px", width=6)
+        self.hough2_min_contour_len_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_minlen_frame, from_=1, to=200, variable=self.hough2_min_contour_len_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_min_contour_len_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_hough_len_frame = ttk.Frame(algo2_frame)
+        algo2_hough_len_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_hough_len_frame, text="直线最小长度:").pack(side=tk.LEFT)
+        self.hough2_min_len_var = tk.IntVar(value=60)
+        self.hough2_min_len_label = ttk.Label(algo2_hough_len_frame, text="60px", width=6)
+        self.hough2_min_len_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_hough_len_frame, from_=10, to=500, variable=self.hough2_min_len_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_min_len_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_hough_gap_frame = ttk.Frame(algo2_frame)
+        algo2_hough_gap_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_hough_gap_frame, text="直线最大间隙:").pack(side=tk.LEFT)
+        self.hough2_max_gap_var = tk.IntVar(value=10)
+        self.hough2_max_gap_label = ttk.Label(algo2_hough_gap_frame, text="10px", width=6)
+        self.hough2_max_gap_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_hough_gap_frame, from_=0, to=100, variable=self.hough2_max_gap_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_max_gap_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_simplify_frame = ttk.Frame(algo2_frame)
+        algo2_simplify_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_simplify_frame, text="轮廓简化:").pack(side=tk.LEFT)
+        self.hough2_simplify_var = tk.DoubleVar(value=0.002)
+        ttk.Scale(algo2_simplify_frame, from_=0.0001, to=0.02, variable=self.hough2_simplify_var,
+                  orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo2_smooth_frame = ttk.Frame(algo2_frame)
+        algo2_smooth_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo2_smooth_frame, text="曲线B-spline平滑:").pack(side=tk.LEFT)
+        self.hough2_bspline_iter_var = tk.IntVar(value=2)
+        self.hough2_bspline_iter_label = ttk.Label(algo2_smooth_frame, text="2", width=3)
+        self.hough2_bspline_iter_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo2_smooth_frame, from_=0, to=5, variable=self.hough2_bspline_iter_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.hough2_bspline_iter_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.hough2_optimize_paths_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(algo2_frame, text="路径优化(减少空行程)", variable=self.hough2_optimize_paths_var).pack(anchor=tk.W, padx=5, pady=2)
+        ttk.Button(algo2_frame, text="算法二：Hough直线替换 处理", command=self.process_algo_hough_replace).pack(fill=tk.X, padx=5, pady=5)
+
+        algo3_frame = ttk.LabelFrame(image_scroll_frame, text="算法三：Potrace + 直线约束")
+        algo3_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        algo3_denoise_frame = ttk.Frame(algo3_frame)
+        algo3_denoise_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_denoise_frame, text="去噪强度:").pack(side=tk.LEFT)
+        self.potrace_denoise_var = tk.IntVar(value=3)
+        self.potrace_denoise_label = ttk.Label(algo3_denoise_frame, text="3", width=3)
+        self.potrace_denoise_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo3_denoise_frame, from_=0, to=10, variable=self.potrace_denoise_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.potrace_denoise_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo3_bin_frame = ttk.Frame(algo3_frame)
+        algo3_bin_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_bin_frame, text="二值化:").pack(side=tk.LEFT)
+        self.potrace_binarize_method_var = tk.StringVar(value='otsu')
+        ttk.Combobox(algo3_bin_frame, textvariable=self.potrace_binarize_method_var, width=12, state='readonly',
+                     values=['adaptive', 'otsu', 'fixed']).pack(side=tk.RIGHT, padx=2)
+
+        algo3_bin_th_frame = ttk.Frame(algo3_frame)
+        algo3_bin_th_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_bin_th_frame, text="阈值(固定):").pack(side=tk.LEFT)
+        self.potrace_fixed_threshold_var = tk.IntVar(value=128)
+        self.potrace_fixed_threshold_label = ttk.Label(algo3_bin_th_frame, text="128", width=4)
+        self.potrace_fixed_threshold_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo3_bin_th_frame, from_=0, to=255, variable=self.potrace_fixed_threshold_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.potrace_fixed_threshold_label.config(text=str(int(float(v))))).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo3_simplify_frame = ttk.Frame(algo3_frame)
+        algo3_simplify_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_simplify_frame, text="轮廓简化:").pack(side=tk.LEFT)
+        self.potrace_simplify_var = tk.DoubleVar(value=0.002)
+        ttk.Scale(algo3_simplify_frame, from_=0.0001, to=0.05, variable=self.potrace_simplify_var,
+                  orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo3_minlen_frame = ttk.Frame(algo3_frame)
+        algo3_minlen_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_minlen_frame, text="最小轮廓长度:").pack(side=tk.LEFT)
+        self.potrace_min_contour_len_var = tk.IntVar(value=20)
+        self.potrace_min_contour_len_label = ttk.Label(algo3_minlen_frame, text="20px", width=6)
+        self.potrace_min_contour_len_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo3_minlen_frame, from_=2, to=500, variable=self.potrace_min_contour_len_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.potrace_min_contour_len_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo3_lineang_frame = ttk.Frame(algo3_frame)
+        algo3_lineang_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_lineang_frame, text="直线角度容差:").pack(side=tk.LEFT)
+        self.potrace_line_angle_tol_var = tk.IntVar(value=8)
+        self.potrace_line_angle_tol_label = ttk.Label(algo3_lineang_frame, text="8°", width=5)
+        self.potrace_line_angle_tol_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo3_lineang_frame, from_=1, to=30, variable=self.potrace_line_angle_tol_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.potrace_line_angle_tol_label.config(text=f"{int(float(v))}°")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo3_linedist_frame = ttk.Frame(algo3_frame)
+        algo3_linedist_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo3_linedist_frame, text="直线距离容差:").pack(side=tk.LEFT)
+        self.potrace_line_dist_tol_var = tk.IntVar(value=2)
+        self.potrace_line_dist_tol_label = ttk.Label(algo3_linedist_frame, text="2px", width=6)
+        self.potrace_line_dist_tol_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo3_linedist_frame, from_=0, to=10, variable=self.potrace_line_dist_tol_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.potrace_line_dist_tol_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        ttk.Button(algo3_frame, text="算法三：Potrace 处理", command=self.process_algo_potrace).pack(fill=tk.X, padx=5, pady=5)
+
+        algo4_frame = ttk.LabelFrame(image_scroll_frame, text="算法四：DeepSVG / Pix2Vector")
+        algo4_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        algo4_backend_frame = ttk.Frame(algo4_frame)
+        algo4_backend_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo4_backend_frame, text="后端:").pack(side=tk.LEFT)
+        self.dsvg_backend_var = tk.StringVar(value='DeepSVG')
+        ttk.Combobox(algo4_backend_frame, textvariable=self.dsvg_backend_var, width=12, state='readonly',
+                     values=['DeepSVG', 'Pix2Vector']).pack(side=tk.RIGHT, padx=2)
+
+        algo4_cmd_frame = ttk.Frame(algo4_frame)
+        algo4_cmd_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo4_cmd_frame, text="推理命令(可空):").pack(side=tk.LEFT)
+        self.dsvg_command_var = tk.StringVar(value='')
+        ttk.Entry(algo4_cmd_frame, textvariable=self.dsvg_command_var, width=22).pack(side=tk.RIGHT, padx=2)
+
+        algo4_sample_frame = ttk.Frame(algo4_frame)
+        algo4_sample_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo4_sample_frame, text="曲线采样步长:").pack(side=tk.LEFT)
+        self.dsvg_sample_step_var = tk.IntVar(value=4)
+        self.dsvg_sample_step_label = ttk.Label(algo4_sample_frame, text="4px", width=6)
+        self.dsvg_sample_step_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo4_sample_frame, from_=1, to=20, variable=self.dsvg_sample_step_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.dsvg_sample_step_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo4_simplify_frame = ttk.Frame(algo4_frame)
+        algo4_simplify_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo4_simplify_frame, text="轮廓简化:").pack(side=tk.LEFT)
+        self.dsvg_simplify_var = tk.DoubleVar(value=0.002)
+        ttk.Scale(algo4_simplify_frame, from_=0.0001, to=0.05, variable=self.dsvg_simplify_var,
+                  orient=tk.HORIZONTAL).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        algo4_minlen_frame = ttk.Frame(algo4_frame)
+        algo4_minlen_frame.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(algo4_minlen_frame, text="最小线条长度:").pack(side=tk.LEFT)
+        self.dsvg_min_contour_len_var = tk.IntVar(value=20)
+        self.dsvg_min_contour_len_label = ttk.Label(algo4_minlen_frame, text="20px", width=6)
+        self.dsvg_min_contour_len_label.pack(side=tk.RIGHT, padx=5)
+        ttk.Scale(algo4_minlen_frame, from_=2, to=500, variable=self.dsvg_min_contour_len_var,
+                  orient=tk.HORIZONTAL, command=lambda v: self.dsvg_min_contour_len_label.config(text=f"{int(float(v))}px")).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+        self.dsvg_optimize_paths_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(algo4_frame, text="路径优化(减少空行程)", variable=self.dsvg_optimize_paths_var).pack(anchor=tk.W, padx=5, pady=2)
+        ttk.Button(algo4_frame, text="算法四：DeepSVG / Pix2Vector 处理", command=self.process_algo_deepsvg_pix2vector).pack(fill=tk.X, padx=5, pady=5)
         
         # 区域选择
         region_frame = ttk.LabelFrame(image_scroll_frame, text="区域选择")
@@ -2190,10 +2419,8 @@ class GCodeApp:
                 # 使用双边滤波保留边缘同时去噪
                 gray = cv2.bilateralFilter(gray, 9, denoise_strength * 10, denoise_strength * 10)
             
-            # === 步骤2: 自适应二值化 ===
-            # 使用自适应阈值处理不同光照条件
             binary = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY_INV, 11, 2
             )
             
@@ -2210,21 +2437,18 @@ class GCodeApp:
             
             # 创建输出图像
             skeleton_result = np.zeros_like(binary)
-            
+
             if text_mask is not None:
-                # 文字区域：使用骨架化
-                text_region = binary & text_mask
+                text_region = cv2.bitwise_and(binary, text_mask)
                 if np.any(text_region > 0):
                     text_skeleton = skeletonize(text_region > 0)
                     skeleton_result = skeleton_result | (text_skeleton.astype(np.uint8) * 255)
-                
-                # 非文字区域：使用细化
-                non_text_region = binary & ~text_mask
+
+                non_text_region = cv2.bitwise_and(binary, cv2.bitwise_not(text_mask))
                 if np.any(non_text_region > 0):
                     non_text_thinned = thin(non_text_region > 0)
                     skeleton_result = skeleton_result | (non_text_thinned.astype(np.uint8) * 255)
             else:
-                # 没有文字检测，对整个图像进行细化
                 thinned = thin(binary > 0)
                 skeleton_result = (thinned.astype(np.uint8) * 255)
             
@@ -2282,6 +2506,434 @@ class GCodeApp:
             import traceback
             traceback.print_exc()
             messagebox.showerror("错误", f"单线化处理失败: {str(e)}")
+
+    def process_algo_medial_axis(self):
+        if self.original_image is None:
+            messagebox.showwarning("警告", "请先加载图片")
+            return
+
+        try:
+            from skimage.morphology import medial_axis
+        except ImportError:
+            messagebox.showerror("错误", "请安装 scikit-image: pip install scikit-image")
+            return
+
+        try:
+            if self.contours:
+                self.contours = []
+                self.gcode_lines = []
+                self.selected_object = None
+                self.contour_bounds = None
+                self.image_rotation = 0
+                self.image_rotation_var.set(0)
+                self.image_rotation_label.config(text="0°")
+
+            rotated_img = self._get_rotated_image()
+
+            offset_x_px = 0
+            offset_y_px = 0
+            if self.crop_region:
+                x1, y1, x2, y2 = self.crop_region
+                img_to_process = ImageProcessor.crop_image(rotated_img, x1, y1, x2, y2)
+                offset_x_px = x1
+                offset_y_px = y1
+            else:
+                img_to_process = rotated_img
+
+            denoise_strength = int(self.ma_denoise_var.get())
+            min_contour_len = int(self.ma_min_contour_len_var.get())
+            simplify = float(self.ma_simplify_var.get())
+            smooth_iters = int(self.ma_bspline_iter_var.get())
+            do_opt = bool(self.ma_optimize_paths_var.get())
+
+            self.status_label.config(text="算法一：预处理...", foreground='blue')
+            self.root.update()
+
+            gray = cv2.cvtColor(img_to_process, cv2.COLOR_BGR2GRAY) if len(img_to_process.shape) == 3 else img_to_process.copy()
+            if denoise_strength > 0:
+                gray = cv2.bilateralFilter(gray, 9, denoise_strength * 10, denoise_strength * 10)
+
+            binary = self._binarize_to_foreground(gray, 'adaptive', 128)
+
+            self.status_label.config(text="算法一：Medial Axis...", foreground='blue')
+            self.root.update()
+
+            sk = medial_axis(binary > 0)
+            skeleton_result = (sk.astype(np.uint8) * 255)
+            skeleton_result = self._remove_small_components(skeleton_result, min_contour_len)
+
+            self.status_label.config(text="算法一：提取路径...", foreground='blue')
+            self.root.update()
+
+            contours_cv, _ = cv2.findContours(skeleton_result, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            new_contours = []
+            for contour in contours_cv:
+                if len(contour) < 2:
+                    continue
+                epsilon = simplify * cv2.arcLength(contour, False)
+                approx = cv2.approxPolyDP(contour, epsilon, False)
+                points = []
+                for point in approx:
+                    points.append((point[0][0] + offset_x_px, point[0][1] + offset_y_px))
+                if len(points) >= 2:
+                    new_contours.append(points)
+
+            if smooth_iters > 0:
+                new_contours = [self._bspline_smooth_polyline(c, smooth_iters) for c in new_contours]
+            if do_opt and len(new_contours) >= 2:
+                new_contours = self._optimize_contours_order(new_contours)
+
+            self.contours.extend(new_contours)
+
+            h_full, w_full = rotated_img.shape[:2]
+            self.image_mm_width = w_full * 0.1
+            self.image_mm_height = h_full * 0.1
+
+            self.center_contours_on_paper()
+            self.gcode_lines = []
+
+            self.status_label.config(text=f"算法一完成, 新增 {len(new_contours)} 条路径, 共 {len(self.contours)} 条", foreground='green')
+            self.draw_paper()
+            self.notebook.select(1)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("错误", f"算法一处理失败: {str(e)}")
+
+    def process_algo_hough_replace(self):
+        if self.original_image is None:
+            messagebox.showwarning("警告", "请先加载图片")
+            return
+
+        try:
+            from skimage.morphology import skeletonize
+        except ImportError:
+            messagebox.showerror("错误", "请安装 scikit-image: pip install scikit-image")
+            return
+
+        try:
+            if self.contours:
+                self.contours = []
+                self.gcode_lines = []
+                self.selected_object = None
+                self.contour_bounds = None
+                self.image_rotation = 0
+                self.image_rotation_var.set(0)
+                self.image_rotation_label.config(text="0°")
+
+            rotated_img = self._get_rotated_image()
+
+            offset_x_px = 0
+            offset_y_px = 0
+            if self.crop_region:
+                x1, y1, x2, y2 = self.crop_region
+                img_to_process = ImageProcessor.crop_image(rotated_img, x1, y1, x2, y2)
+                offset_x_px = x1
+                offset_y_px = y1
+            else:
+                img_to_process = rotated_img
+
+            denoise_strength = int(self.hough2_denoise_var.get())
+            bin_method = str(self.hough2_binarize_method_var.get())
+            fixed_th = int(self.hough2_fixed_threshold_var.get())
+            min_contour_len = int(self.hough2_min_contour_len_var.get())
+            min_line_len = int(self.hough2_min_len_var.get())
+            max_gap = int(self.hough2_max_gap_var.get())
+            simplify = float(self.hough2_simplify_var.get())
+            smooth_iters = int(self.hough2_bspline_iter_var.get())
+            do_opt = bool(self.hough2_optimize_paths_var.get())
+
+            self.status_label.config(text="算法二：预处理与二值化...", foreground='blue')
+            self.root.update()
+
+            gray = cv2.cvtColor(img_to_process, cv2.COLOR_BGR2GRAY) if len(img_to_process.shape) == 3 else img_to_process.copy()
+            if denoise_strength > 0:
+                gray = cv2.bilateralFilter(gray, 9, denoise_strength * 10, denoise_strength * 10)
+
+            binary = self._binarize_to_foreground(gray, bin_method, fixed_th)
+
+            self.status_label.config(text="算法二：骨架化...", foreground='blue')
+            self.root.update()
+
+            sk = skeletonize(binary > 0)
+            skeleton_result = (sk.astype(np.uint8) * 255)
+            skeleton_result = self._remove_small_components(skeleton_result, min_contour_len)
+
+            self.status_label.config(text="算法二：Hough直线替换...", foreground='blue')
+            self.root.update()
+
+            skeleton_result, _ = self._replace_skeleton_by_hough_lines(
+                skeleton_result,
+                min_line_length=max(1, min_line_len),
+                max_line_gap=max(0, max_gap),
+            )
+
+            self.status_label.config(text="算法二：提取路径...", foreground='blue')
+            self.root.update()
+
+            contours_cv, _ = cv2.findContours(skeleton_result, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            new_contours = []
+            for contour in contours_cv:
+                if len(contour) < 2:
+                    continue
+                epsilon = simplify * cv2.arcLength(contour, False)
+                approx = cv2.approxPolyDP(contour, epsilon, False)
+                points = []
+                for point in approx:
+                    points.append((point[0][0] + offset_x_px, point[0][1] + offset_y_px))
+                if len(points) >= 2:
+                    new_contours.append(points)
+
+            if smooth_iters > 0:
+                new_contours = [self._smooth_curves_preserve_lines(c, smooth_iters) for c in new_contours]
+            if do_opt and len(new_contours) >= 2:
+                new_contours = self._optimize_contours_order(new_contours)
+
+            self.contours.extend(new_contours)
+
+            h_full, w_full = rotated_img.shape[:2]
+            self.image_mm_width = w_full * 0.1
+            self.image_mm_height = h_full * 0.1
+
+            self.center_contours_on_paper()
+            self.gcode_lines = []
+
+            self.status_label.config(text=f"算法二完成, 新增 {len(new_contours)} 条路径, 共 {len(self.contours)} 条", foreground='green')
+            self.draw_paper()
+            self.notebook.select(1)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("错误", f"算法二处理失败: {str(e)}")
+
+    def process_algo_potrace(self):
+        if self.original_image is None:
+            messagebox.showwarning("警告", "请先加载图片")
+            return
+
+        try:
+            if self.contours:
+                self.contours = []
+                self.gcode_lines = []
+                self.selected_object = None
+                self.contour_bounds = None
+                self.image_rotation = 0
+                self.image_rotation_var.set(0)
+                self.image_rotation_label.config(text="0°")
+
+            rotated_img = self._get_rotated_image()
+
+            offset_x_px = 0
+            offset_y_px = 0
+            if self.crop_region:
+                x1, y1, x2, y2 = self.crop_region
+                img_to_process = ImageProcessor.crop_image(rotated_img, x1, y1, x2, y2)
+                offset_x_px = x1
+                offset_y_px = y1
+            else:
+                img_to_process = rotated_img
+
+            denoise_strength = int(self.potrace_denoise_var.get())
+            bin_method = str(self.potrace_binarize_method_var.get())
+            fixed_th = int(self.potrace_fixed_threshold_var.get())
+            simplify = float(self.potrace_simplify_var.get())
+            min_contour_len = int(self.potrace_min_contour_len_var.get())
+            angle_tol = float(self.potrace_line_angle_tol_var.get())
+            dist_tol = float(self.potrace_line_dist_tol_var.get())
+
+            self.status_label.config(text="算法三：预处理与二值化...", foreground='blue')
+            self.root.update()
+
+            gray = cv2.cvtColor(img_to_process, cv2.COLOR_BGR2GRAY) if len(img_to_process.shape) == 3 else img_to_process.copy()
+            if denoise_strength > 0:
+                gray = cv2.bilateralFilter(gray, 9, denoise_strength * 10, denoise_strength * 10)
+
+            binary = self._binarize_to_foreground(gray, bin_method, fixed_th)
+            if min_contour_len > 0:
+                binary = self._remove_small_components(binary, min_contour_len)
+
+            self.status_label.config(text="算法三：Potrace轮廓提取...", foreground='blue')
+            self.root.update()
+
+            contours_cv, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+
+            new_contours = []
+            for contour in contours_cv:
+                if contour is None or len(contour) < 2:
+                    continue
+                if min_contour_len > 0 and cv2.arcLength(contour, True) < float(min_contour_len):
+                    continue
+
+                if simplify > 0:
+                    eps = simplify * cv2.arcLength(contour, True)
+                    contour2 = cv2.approxPolyDP(contour, eps, True)
+                else:
+                    contour2 = contour
+
+                pts = [(int(p[0][0]), int(p[0][1])) for p in contour2]
+                if len(pts) < 2:
+                    continue
+
+                if pts[0] != pts[-1]:
+                    pts.append(pts[0])
+
+                pts = self._line_constraint_polyline(pts, angle_tol_deg=angle_tol, dist_tol=dist_tol)
+                pts = [(int(round(x + offset_x_px)), int(round(y + offset_y_px))) for x, y in pts]
+
+                pts2 = []
+                last = None
+                for p in pts:
+                    if last is None or p != last:
+                        pts2.append(p)
+                        last = p
+                if len(pts2) >= 2:
+                    new_contours.append(pts2)
+
+            self.contours.extend(new_contours)
+
+            h_full, w_full = rotated_img.shape[:2]
+            self.image_mm_width = w_full * 0.1
+            self.image_mm_height = h_full * 0.1
+
+            self.center_contours_on_paper()
+            self.gcode_lines = []
+
+            self.status_label.config(text=f"算法三完成, 新增 {len(new_contours)} 条路径, 共 {len(self.contours)} 条", foreground='green')
+            self.draw_paper()
+            self.notebook.select(1)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("错误", f"算法三处理失败: {str(e)}")
+
+    def process_algo_deepsvg_pix2vector(self):
+        if self.original_image is None:
+            messagebox.showwarning("警告", "请先加载图片")
+            return
+
+        try:
+            if self.contours:
+                self.contours = []
+                self.gcode_lines = []
+                self.selected_object = None
+                self.contour_bounds = None
+                self.image_rotation = 0
+                self.image_rotation_var.set(0)
+                self.image_rotation_label.config(text="0°")
+
+            rotated_img = self._get_rotated_image()
+
+            offset_x_px = 0
+            offset_y_px = 0
+            if self.crop_region:
+                x1, y1, x2, y2 = self.crop_region
+                img_to_process = ImageProcessor.crop_image(rotated_img, x1, y1, x2, y2)
+                offset_x_px = x1
+                offset_y_px = y1
+            else:
+                img_to_process = rotated_img
+
+            backend = str(self.dsvg_backend_var.get())
+            cmd_template = str(self.dsvg_command_var.get()).strip()
+            sample_step = int(self.dsvg_sample_step_var.get())
+            simplify = float(self.dsvg_simplify_var.get())
+            min_contour_len = int(self.dsvg_min_contour_len_var.get())
+            do_opt = bool(self.dsvg_optimize_paths_var.get())
+
+            svg_path = None
+            if cmd_template:
+                self.status_label.config(text=f"算法四：{backend} 推理中...", foreground='blue')
+                self.root.update()
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    in_path = os.path.join(tmpdir, "input.png")
+                    out_path = os.path.join(tmpdir, "output.svg")
+                    cv2.imwrite(in_path, img_to_process)
+
+                    cmd = cmd_template
+                    cmd = cmd.replace("{in}", in_path).replace("{input}", in_path)
+                    cmd = cmd.replace("{out}", out_path).replace("{output}", out_path)
+
+                    p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    if p.returncode != 0:
+                        msg = (p.stderr or "").strip()
+                        if not msg:
+                            msg = (p.stdout or "").strip()
+                        messagebox.showerror("错误", f"算法四推理失败({backend})\n\n{msg or '未知错误'}")
+                        return
+                    if not os.path.exists(out_path):
+                        messagebox.showerror("错误", f"未生成SVG输出文件: {out_path}")
+                        return
+                    svg_path = out_path
+
+                    polylines_svg, viewbox = self._svg_load_polylines(svg_path, sample_step=max(1, sample_step))
+            else:
+                svg_path = filedialog.askopenfilename(
+                    title="选择DeepSVG / Pix2Vector导出的SVG",
+                    filetypes=[('SVG文件', '*.svg'), ('所有文件', '*.*')]
+                )
+                if not svg_path:
+                    return
+                self.status_label.config(text="算法四：解析SVG...", foreground='blue')
+                self.root.update()
+                polylines_svg, viewbox = self._svg_load_polylines(svg_path, sample_step=max(1, sample_step))
+
+            if not polylines_svg:
+                messagebox.showwarning("提示", "SVG中未解析到可用路径")
+                return
+
+            img_h, img_w = img_to_process.shape[:2]
+            mapped = self._svg_map_polylines_to_image(polylines_svg, viewbox, img_w, img_h)
+            mapped = [[(int(round(x + offset_x_px)), int(round(y + offset_y_px))) for x, y in poly] for poly in mapped]
+
+            new_contours = []
+            for pts in mapped:
+                if not pts or len(pts) < 2:
+                    continue
+                pts2 = []
+                last = None
+                for p in pts:
+                    if last is None or p != last:
+                        pts2.append(p)
+                        last = p
+                if len(pts2) < 2:
+                    continue
+                if len(pts2) < min_contour_len:
+                    continue
+
+                if simplify > 0 and len(pts2) >= 3:
+                    arr = np.array(pts2, dtype=np.int32).reshape(-1, 1, 2)
+                    eps = simplify * cv2.arcLength(arr, False)
+                    approx = cv2.approxPolyDP(arr, eps, False)
+                    pts2 = [(int(p[0][0]), int(p[0][1])) for p in approx]
+                    if len(pts2) < 2:
+                        continue
+
+                new_contours.append(pts2)
+
+            if do_opt and len(new_contours) >= 2:
+                new_contours = self._optimize_contours_order(new_contours)
+
+            self.contours.extend(new_contours)
+
+            h_full, w_full = rotated_img.shape[:2]
+            self.image_mm_width = w_full * 0.1
+            self.image_mm_height = h_full * 0.1
+
+            self.center_contours_on_paper()
+            self.gcode_lines = []
+
+            self.status_label.config(text=f"算法四完成, 新增 {len(new_contours)} 条路径, 共 {len(self.contours)} 条", foreground='green')
+            self.draw_paper()
+            self.notebook.select(1)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("错误", f"算法四处理失败: {str(e)}")
     
     def _ocr_is_available(self):
         if getattr(self, '_ocr_import_failed', False):
@@ -2479,6 +3131,819 @@ class GCodeApp:
                 result[labels == i] = 255
         
         return result
+
+    def _binarize_to_foreground(self, gray_img, method='adaptive', fixed_threshold=128):
+        gray = gray_img
+        if len(gray.shape) != 2:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+
+        method = (method or 'adaptive').strip().lower()
+        if method == 'otsu':
+            _, b = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            cand = [b, 255 - b]
+        elif method == 'fixed':
+            th = int(max(0, min(255, fixed_threshold)))
+            _, b = cv2.threshold(gray, th, 255, cv2.THRESH_BINARY)
+            cand = [b, 255 - b]
+        else:
+            b1 = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 11, 2
+            )
+            b2 = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, 11, 2
+            )
+            cand = [b1, b2]
+
+        best = None
+        best_ratio = None
+        for c in cand:
+            ratio = float(np.count_nonzero(c)) / float(c.size)
+            if ratio <= 0.0005 or ratio >= 0.9995:
+                continue
+            if best_ratio is None or ratio < best_ratio:
+                best_ratio = ratio
+                best = c
+
+        return best if best is not None else cand[-1]
+
+    def _replace_skeleton_by_hough_lines(self, skeleton_img, min_line_length=60, max_line_gap=10, threshold=30, erase_radius=2):
+        if skeleton_img is None:
+            return skeleton_img, []
+        bw = skeleton_img.copy()
+        if bw.dtype != np.uint8:
+            bw = bw.astype(np.uint8)
+        bw = np.where(bw > 0, 255, 0).astype(np.uint8)
+
+        lines = cv2.HoughLinesP(
+            bw,
+            rho=1,
+            theta=np.pi / 180.0,
+            threshold=int(max(1, threshold)),
+            minLineLength=int(max(1, min_line_length)),
+            maxLineGap=int(max(0, max_line_gap)),
+        )
+
+        if lines is None or len(lines) == 0:
+            return bw, []
+
+        out = bw.copy()
+        thick_erase = int(max(1, erase_radius * 2 + 1))
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            mask = np.zeros_like(out)
+            cv2.line(mask, (int(x1), int(y1)), (int(x2), int(y2)), 255, thick_erase)
+            out[mask > 0] = 0
+
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            cv2.line(out, (int(x1), int(y1)), (int(x2), int(y2)), 255, 1)
+
+        return out, lines.reshape(-1, 4).tolist()
+
+    def _bspline_smooth_polyline(self, points, iterations=2):
+        if not points or len(points) < 3 or iterations <= 0:
+            return points
+        pts = [(float(x), float(y)) for x, y in points]
+        for _ in range(iterations):
+            if len(pts) < 3:
+                break
+            if len(pts) > 2500:
+                break
+            out = [pts[0]]
+            for i in range(len(pts) - 1):
+                x0, y0 = pts[i]
+                x1, y1 = pts[i + 1]
+                qx, qy = 0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1
+                rx, ry = 0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1
+                out.append((qx, qy))
+                out.append((rx, ry))
+            out.append(pts[-1])
+            pts = out
+        return [(int(round(x)), int(round(y))) for x, y in pts]
+
+    def _smooth_curves_preserve_lines(self, points, iterations=2, angle_tol_deg=8.0, dist_tol=1.2):
+        if not points or len(points) < 3 or iterations <= 0:
+            return points
+
+        pts = [(float(x), float(y)) for x, y in points]
+        n = len(pts)
+
+        def _angle_deg(v1, v2):
+            import math
+            x1, y1 = v1
+            x2, y2 = v2
+            n1 = math.hypot(x1, y1)
+            n2 = math.hypot(x2, y2)
+            if n1 <= 1e-9 or n2 <= 1e-9:
+                return 0.0
+            c = (x1 * x2 + y1 * y2) / (n1 * n2)
+            c = max(-1.0, min(1.0, c))
+            return math.degrees(math.acos(c))
+
+        def _perp_dist(p, a, b):
+            import math
+            px, py = p
+            ax, ay = a
+            bx, by = b
+            vx, vy = bx - ax, by - ay
+            wx, wy = px - ax, py - ay
+            den = vx * vx + vy * vy
+            if den <= 1e-9:
+                return math.hypot(px - ax, py - ay)
+            t = (wx * vx + wy * vy) / den
+            t = max(0.0, min(1.0, t))
+            cx, cy = ax + t * vx, ay + t * vy
+            return math.hypot(px - cx, py - cy)
+
+        corner_idx = [0]
+        for i in range(1, n - 1):
+            x0, y0 = pts[i - 1]
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            a = _angle_deg((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))
+            if a > float(angle_tol_deg):
+                corner_idx.append(i)
+        corner_idx.append(n - 1)
+
+        merged = []
+        for k in range(len(corner_idx) - 1):
+            s = corner_idx[k]
+            e = corner_idx[k + 1]
+            if e <= s:
+                continue
+            seg = pts[s:e + 1]
+            if len(seg) < 2:
+                continue
+
+            a = seg[0]
+            b = seg[-1]
+            max_d = 0.0
+            for p in seg[1:-1]:
+                d = _perp_dist(p, a, b)
+                if d > max_d:
+                    max_d = d
+                    if max_d > dist_tol:
+                        break
+
+            if max_d <= dist_tol:
+                seg_out = [a, b]
+            else:
+                seg_out = [(float(x), float(y)) for x, y in self._bspline_smooth_polyline([(int(round(x)), int(round(y))) for x, y in seg], iterations)]
+                if seg_out:
+                    seg_out[0] = a
+                    seg_out[-1] = b
+
+            if not merged:
+                merged.extend(seg_out)
+            else:
+                if seg_out and (abs(merged[-1][0] - seg_out[0][0]) <= 1e-6 and abs(merged[-1][1] - seg_out[0][1]) <= 1e-6):
+                    merged.extend(seg_out[1:])
+                else:
+                    merged.extend(seg_out)
+
+        out_int = []
+        last = None
+        for x, y in merged:
+            p = (int(round(x)), int(round(y)))
+            if last is None or p != last:
+                out_int.append(p)
+                last = p
+        return out_int if len(out_int) >= 2 else points
+
+    def _line_constraint_polyline(self, points, angle_tol_deg=8.0, dist_tol=2.0):
+        if not points or len(points) < 3:
+            return points
+
+        closed = (points[0] == points[-1])
+        if closed:
+            pts_in = points[:-1]
+        else:
+            pts_in = points[:]
+
+        if len(pts_in) < 3:
+            return points
+
+        pts = [(float(x), float(y)) for x, y in pts_in]
+        n = len(pts)
+
+        def _angle_deg(v1, v2):
+            import math
+            x1, y1 = v1
+            x2, y2 = v2
+            n1 = math.hypot(x1, y1)
+            n2 = math.hypot(x2, y2)
+            if n1 <= 1e-9 or n2 <= 1e-9:
+                return 0.0
+            c = (x1 * x2 + y1 * y2) / (n1 * n2)
+            c = max(-1.0, min(1.0, c))
+            return math.degrees(math.acos(c))
+
+        def _perp_dist(p, a, b):
+            import math
+            px, py = p
+            ax, ay = a
+            bx, by = b
+            vx, vy = bx - ax, by - ay
+            wx, wy = px - ax, py - ay
+            den = vx * vx + vy * vy
+            if den <= 1e-9:
+                return math.hypot(px - ax, py - ay)
+            t = (wx * vx + wy * vy) / den
+            t = max(0.0, min(1.0, t))
+            cx, cy = ax + t * vx, ay + t * vy
+            return math.hypot(px - cx, py - cy)
+
+        corner_idx = [0]
+        for i in range(1, n - 1):
+            x0, y0 = pts[i - 1]
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            a = _angle_deg((x1 - x0, y1 - y0), (x2 - x1, y2 - y1))
+            if a > float(angle_tol_deg):
+                corner_idx.append(i)
+        corner_idx.append(n - 1)
+
+        merged = []
+        for k in range(len(corner_idx) - 1):
+            s = corner_idx[k]
+            e = corner_idx[k + 1]
+            if e <= s:
+                continue
+            seg = pts[s:e + 1]
+            if len(seg) < 2:
+                continue
+
+            a = seg[0]
+            b = seg[-1]
+            max_d = 0.0
+            for p in seg[1:-1]:
+                d = _perp_dist(p, a, b)
+                if d > max_d:
+                    max_d = d
+                    if max_d > float(dist_tol):
+                        break
+
+            if max_d <= float(dist_tol):
+                seg_out = [a, b]
+            else:
+                seg_out = seg
+
+            if not merged:
+                merged.extend(seg_out)
+            else:
+                if seg_out and (abs(merged[-1][0] - seg_out[0][0]) <= 1e-6 and abs(merged[-1][1] - seg_out[0][1]) <= 1e-6):
+                    merged.extend(seg_out[1:])
+                else:
+                    merged.extend(seg_out)
+
+        out_int = []
+        last = None
+        for x, y in merged:
+            p = (int(round(x)), int(round(y)))
+            if last is None or p != last:
+                out_int.append(p)
+                last = p
+
+        if len(out_int) < 2:
+            return points
+
+        if closed and out_int[0] != out_int[-1]:
+            out_int.append(out_int[0])
+        return out_int
+
+    def _svg_load_polylines(self, svg_path, sample_step=4):
+        tree = ET.parse(svg_path)
+        root = tree.getroot()
+
+        viewbox = None
+        vb = root.attrib.get('viewBox') or root.attrib.get('viewbox')
+        if vb:
+            nums = re.findall(r'[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', vb)
+            if len(nums) >= 4:
+                try:
+                    viewbox = (float(nums[0]), float(nums[1]), float(nums[2]), float(nums[3]))
+                except:
+                    viewbox = None
+
+        if viewbox is None:
+            w = self._svg_parse_length(root.attrib.get('width'))
+            h = self._svg_parse_length(root.attrib.get('height'))
+            if w is not None and h is not None and w > 0 and h > 0:
+                viewbox = (0.0, 0.0, float(w), float(h))
+
+        polylines = []
+        self._svg_extract_polylines_from_element(root, (1.0, 0.0, 0.0, 1.0, 0.0, 0.0), polylines, sample_step=max(1, int(sample_step)))
+        polylines = [p for p in polylines if p and len(p) >= 2]
+        return polylines, viewbox
+
+    def _svg_map_polylines_to_image(self, polylines, viewbox, img_w, img_h):
+        if not polylines:
+            return []
+
+        if viewbox is None:
+            xs = []
+            ys = []
+            for poly in polylines:
+                for x, y in poly:
+                    xs.append(float(x))
+                    ys.append(float(y))
+            if xs and ys:
+                minx = min(xs)
+                miny = min(ys)
+                vw = max(1e-6, max(xs) - minx)
+                vh = max(1e-6, max(ys) - miny)
+                viewbox = (minx, miny, vw, vh)
+            else:
+                viewbox = (0.0, 0.0, 1.0, 1.0)
+
+        vb_x, vb_y, vb_w, vb_h = viewbox
+        sx = float(img_w) / float(vb_w) if vb_w else 1.0
+        sy = float(img_h) / float(vb_h) if vb_h else 1.0
+
+        out = []
+        for poly in polylines:
+            pts = []
+            for x, y in poly:
+                px = (float(x) - float(vb_x)) * sx
+                py = (float(y) - float(vb_y)) * sy
+                pts.append((px, py))
+            out.append(pts)
+        return out
+
+    def _svg_parse_length(self, s):
+        if s is None:
+            return None
+        try:
+            s2 = str(s).strip()
+        except:
+            return None
+        if not s2:
+            return None
+        m = re.search(r'[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', s2)
+        if not m:
+            return None
+        try:
+            return float(m.group(0))
+        except:
+            return None
+
+    def _svg_affine_compose(self, outer, inner):
+        a2, b2, c2, d2, e2, f2 = outer
+        a1, b1, c1, d1, e1, f1 = inner
+        a = a2 * a1 + c2 * b1
+        b = b2 * a1 + d2 * b1
+        c = a2 * c1 + c2 * d1
+        d = b2 * c1 + d2 * d1
+        e = a2 * e1 + c2 * f1 + e2
+        f = b2 * e1 + d2 * f1 + f2
+        return (a, b, c, d, e, f)
+
+    def _svg_apply_affine(self, m, p):
+        a, b, c, d, e, f = m
+        x, y = p
+        return (a * x + c * y + e, b * x + d * y + f)
+
+    def _svg_parse_transform(self, s):
+        if not s:
+            return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        try:
+            text = str(s)
+        except:
+            return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+        cur = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        for name, args in re.findall(r'([a-zA-Z]+)\s*\(([^)]*)\)', text):
+            nums = re.findall(r'[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', args)
+            vals = []
+            for n in nums:
+                try:
+                    vals.append(float(n))
+                except:
+                    pass
+            name_l = name.strip().lower()
+            m = None
+            if name_l == 'matrix' and len(vals) >= 6:
+                a, b, c, d, e, f = vals[:6]
+                m = (a, b, c, d, e, f)
+            elif name_l == 'translate' and len(vals) >= 1:
+                tx = vals[0]
+                ty = vals[1] if len(vals) >= 2 else 0.0
+                m = (1.0, 0.0, 0.0, 1.0, tx, ty)
+            elif name_l == 'scale' and len(vals) >= 1:
+                sx = vals[0]
+                sy = vals[1] if len(vals) >= 2 else sx
+                m = (sx, 0.0, 0.0, sy, 0.0, 0.0)
+            elif name_l == 'rotate' and len(vals) >= 1:
+                import math
+                ang = vals[0] * math.pi / 180.0
+                ca = math.cos(ang)
+                sa = math.sin(ang)
+                rot = (ca, sa, -sa, ca, 0.0, 0.0)
+                if len(vals) >= 3:
+                    cx, cy = vals[1], vals[2]
+                    t1 = (1.0, 0.0, 0.0, 1.0, -cx, -cy)
+                    t2 = (1.0, 0.0, 0.0, 1.0, cx, cy)
+                    m = self._svg_affine_compose(t2, self._svg_affine_compose(rot, t1))
+                else:
+                    m = rot
+            if m is not None:
+                cur = self._svg_affine_compose(m, cur)
+        return cur
+
+    def _svg_extract_polylines_from_element(self, el, parent_m, out, sample_step):
+        tag = el.tag
+        if '}' in tag:
+            tag = tag.split('}', 1)[1]
+        tag_l = tag.lower()
+
+        local_m = self._svg_parse_transform(el.attrib.get('transform'))
+        total_m = self._svg_affine_compose(parent_m, local_m)
+
+        if tag_l == 'path':
+            d = el.attrib.get('d') or ''
+            polys = self._svg_parse_path_d(d, sample_step=sample_step)
+            for poly in polys:
+                out.append([self._svg_apply_affine(total_m, p) for p in poly])
+        elif tag_l in ('polyline', 'polygon'):
+            pts = self._svg_parse_points_attr(el.attrib.get('points') or '')
+            if pts and len(pts) >= 2:
+                if tag_l == 'polygon' and pts[0] != pts[-1]:
+                    pts = list(pts) + [pts[0]]
+                out.append([self._svg_apply_affine(total_m, p) for p in pts])
+        elif tag_l == 'line':
+            x1 = self._svg_parse_length(el.attrib.get('x1')) or 0.0
+            y1 = self._svg_parse_length(el.attrib.get('y1')) or 0.0
+            x2 = self._svg_parse_length(el.attrib.get('x2')) or 0.0
+            y2 = self._svg_parse_length(el.attrib.get('y2')) or 0.0
+            out.append([self._svg_apply_affine(total_m, (x1, y1)), self._svg_apply_affine(total_m, (x2, y2))])
+        elif tag_l == 'rect':
+            x = self._svg_parse_length(el.attrib.get('x')) or 0.0
+            y = self._svg_parse_length(el.attrib.get('y')) or 0.0
+            w = self._svg_parse_length(el.attrib.get('width')) or 0.0
+            h = self._svg_parse_length(el.attrib.get('height')) or 0.0
+            pts = [(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)]
+            out.append([self._svg_apply_affine(total_m, p) for p in pts])
+        elif tag_l in ('circle', 'ellipse'):
+            import math
+            cx = self._svg_parse_length(el.attrib.get('cx')) or 0.0
+            cy = self._svg_parse_length(el.attrib.get('cy')) or 0.0
+            if tag_l == 'circle':
+                r = self._svg_parse_length(el.attrib.get('r')) or 0.0
+                rx, ry = r, r
+            else:
+                rx = self._svg_parse_length(el.attrib.get('rx')) or 0.0
+                ry = self._svg_parse_length(el.attrib.get('ry')) or 0.0
+            if rx > 0 and ry > 0:
+                n = 64
+                pts = []
+                for i in range(n + 1):
+                    t = 2.0 * math.pi * (float(i) / float(n))
+                    pts.append((cx + rx * math.cos(t), cy + ry * math.sin(t)))
+                out.append([self._svg_apply_affine(total_m, p) for p in pts])
+
+        for child in list(el):
+            self._svg_extract_polylines_from_element(child, total_m, out, sample_step)
+
+    def _svg_parse_points_attr(self, s):
+        nums = re.findall(r'[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', s or '')
+        pts = []
+        for i in range(0, len(nums) - 1, 2):
+            try:
+                x = float(nums[i])
+                y = float(nums[i + 1])
+                pts.append((x, y))
+            except:
+                continue
+        return pts
+
+    def _svg_parse_path_d(self, d, sample_step=4):
+        if not d:
+            return []
+        tokens = re.findall(r'[A-Za-z]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?', d)
+        if not tokens:
+            return []
+
+        def _is_cmd(t):
+            return len(t) == 1 and t.isalpha()
+
+        def _num(i):
+            try:
+                return float(tokens[i])
+            except:
+                return 0.0
+
+        def _len_est(ps):
+            import math
+            s = 0.0
+            for i in range(len(ps) - 1):
+                x0, y0 = ps[i]
+                x1, y1 = ps[i + 1]
+                s += math.hypot(x1 - x0, y1 - y0)
+            return s
+
+        def _cubic(p0, p1, p2, p3, steps):
+            pts = []
+            for i in range(1, steps + 1):
+                t = float(i) / float(steps)
+                mt = 1.0 - t
+                x = (mt ** 3) * p0[0] + 3 * (mt ** 2) * t * p1[0] + 3 * mt * (t ** 2) * p2[0] + (t ** 3) * p3[0]
+                y = (mt ** 3) * p0[1] + 3 * (mt ** 2) * t * p1[1] + 3 * mt * (t ** 2) * p2[1] + (t ** 3) * p3[1]
+                pts.append((x, y))
+            return pts
+
+        def _quad(p0, p1, p2, steps):
+            pts = []
+            for i in range(1, steps + 1):
+                t = float(i) / float(steps)
+                mt = 1.0 - t
+                x = (mt ** 2) * p0[0] + 2 * mt * t * p1[0] + (t ** 2) * p2[0]
+                y = (mt ** 2) * p0[1] + 2 * mt * t * p1[1] + (t ** 2) * p2[1]
+                pts.append((x, y))
+            return pts
+
+        paths = []
+        cur_path = []
+        cx = cy = 0.0
+        sx = sy = 0.0
+        last_cmd = None
+        last_cubic_ctrl = None
+        last_quad_ctrl = None
+
+        i = 0
+        while i < len(tokens):
+            cmd = tokens[i]
+            if _is_cmd(cmd):
+                i += 1
+                last_cmd = cmd
+            else:
+                if last_cmd is None:
+                    break
+                cmd = last_cmd
+
+            rel = cmd.islower()
+            c = cmd.lower()
+
+            if c == 'm':
+                if i + 1 >= len(tokens):
+                    break
+                x = _num(i)
+                y = _num(i + 1)
+                i += 2
+                if rel:
+                    x += cx
+                    y += cy
+                if cur_path:
+                    paths.append(cur_path)
+                cur_path = [(x, y)]
+                cx, cy = x, y
+                sx, sy = x, y
+                last_cubic_ctrl = None
+                last_quad_ctrl = None
+                while i + 1 < len(tokens) and not _is_cmd(tokens[i]):
+                    x = _num(i)
+                    y = _num(i + 1)
+                    i += 2
+                    if rel:
+                        x += cx
+                        y += cy
+                    cur_path.append((x, y))
+                    cx, cy = x, y
+                continue
+
+            if c == 'z':
+                if cur_path:
+                    if (cx, cy) != (sx, sy):
+                        cur_path.append((sx, sy))
+                    paths.append(cur_path)
+                    cur_path = []
+                cx, cy = sx, sy
+                last_cubic_ctrl = None
+                last_quad_ctrl = None
+                continue
+
+            if c == 'l':
+                while i + 1 < len(tokens) and not _is_cmd(tokens[i]):
+                    x = _num(i)
+                    y = _num(i + 1)
+                    i += 2
+                    if rel:
+                        x += cx
+                        y += cy
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    cur_path.append((x, y))
+                    cx, cy = x, y
+                last_cubic_ctrl = None
+                last_quad_ctrl = None
+                continue
+
+            if c == 'h':
+                while i < len(tokens) and not _is_cmd(tokens[i]):
+                    x = _num(i)
+                    i += 1
+                    if rel:
+                        x += cx
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    cur_path.append((x, cy))
+                    cx = x
+                last_cubic_ctrl = None
+                last_quad_ctrl = None
+                continue
+
+            if c == 'v':
+                while i < len(tokens) and not _is_cmd(tokens[i]):
+                    y = _num(i)
+                    i += 1
+                    if rel:
+                        y += cy
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    cur_path.append((cx, y))
+                    cy = y
+                last_cubic_ctrl = None
+                last_quad_ctrl = None
+                continue
+
+            if c == 'c':
+                while i + 5 < len(tokens) and not _is_cmd(tokens[i]):
+                    x1 = _num(i)
+                    y1 = _num(i + 1)
+                    x2 = _num(i + 2)
+                    y2 = _num(i + 3)
+                    x = _num(i + 4)
+                    y = _num(i + 5)
+                    i += 6
+                    if rel:
+                        x1 += cx
+                        y1 += cy
+                        x2 += cx
+                        y2 += cy
+                        x += cx
+                        y += cy
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    p0 = (cx, cy)
+                    p1 = (x1, y1)
+                    p2 = (x2, y2)
+                    p3 = (x, y)
+                    steps = max(2, int(_len_est([p0, p1, p2, p3]) / float(max(1, sample_step))))
+                    cur_path.extend(_cubic(p0, p1, p2, p3, steps))
+                    cx, cy = x, y
+                    last_cubic_ctrl = (x2, y2)
+                    last_quad_ctrl = None
+                continue
+
+            if c == 's':
+                while i + 3 < len(tokens) and not _is_cmd(tokens[i]):
+                    x2 = _num(i)
+                    y2 = _num(i + 1)
+                    x = _num(i + 2)
+                    y = _num(i + 3)
+                    i += 4
+                    if rel:
+                        x2 += cx
+                        y2 += cy
+                        x += cx
+                        y += cy
+                    if last_cubic_ctrl is None:
+                        x1, y1 = cx, cy
+                    else:
+                        x1 = 2 * cx - last_cubic_ctrl[0]
+                        y1 = 2 * cy - last_cubic_ctrl[1]
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    p0 = (cx, cy)
+                    p1 = (x1, y1)
+                    p2 = (x2, y2)
+                    p3 = (x, y)
+                    steps = max(2, int(_len_est([p0, p1, p2, p3]) / float(max(1, sample_step))))
+                    cur_path.extend(_cubic(p0, p1, p2, p3, steps))
+                    cx, cy = x, y
+                    last_cubic_ctrl = (x2, y2)
+                    last_quad_ctrl = None
+                continue
+
+            if c == 'q':
+                while i + 3 < len(tokens) and not _is_cmd(tokens[i]):
+                    x1 = _num(i)
+                    y1 = _num(i + 1)
+                    x = _num(i + 2)
+                    y = _num(i + 3)
+                    i += 4
+                    if rel:
+                        x1 += cx
+                        y1 += cy
+                        x += cx
+                        y += cy
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    p0 = (cx, cy)
+                    p1 = (x1, y1)
+                    p2 = (x, y)
+                    steps = max(2, int(_len_est([p0, p1, p2]) / float(max(1, sample_step))))
+                    cur_path.extend(_quad(p0, p1, p2, steps))
+                    cx, cy = x, y
+                    last_quad_ctrl = (x1, y1)
+                    last_cubic_ctrl = None
+                continue
+
+            if c == 't':
+                while i + 1 < len(tokens) and not _is_cmd(tokens[i]):
+                    x = _num(i)
+                    y = _num(i + 1)
+                    i += 2
+                    if rel:
+                        x += cx
+                        y += cy
+                    if last_quad_ctrl is None:
+                        x1, y1 = cx, cy
+                    else:
+                        x1 = 2 * cx - last_quad_ctrl[0]
+                        y1 = 2 * cy - last_quad_ctrl[1]
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    p0 = (cx, cy)
+                    p1 = (x1, y1)
+                    p2 = (x, y)
+                    steps = max(2, int(_len_est([p0, p1, p2]) / float(max(1, sample_step))))
+                    cur_path.extend(_quad(p0, p1, p2, steps))
+                    cx, cy = x, y
+                    last_quad_ctrl = (x1, y1)
+                    last_cubic_ctrl = None
+                continue
+
+            if c == 'a':
+                while i + 6 < len(tokens) and not _is_cmd(tokens[i]):
+                    x = _num(i + 5)
+                    y = _num(i + 6)
+                    i += 7
+                    if rel:
+                        x += cx
+                        y += cy
+                    if not cur_path:
+                        cur_path = [(cx, cy)]
+                    cur_path.append((x, y))
+                    cx, cy = x, y
+                    last_cubic_ctrl = None
+                    last_quad_ctrl = None
+                continue
+
+            i += 1
+
+        if cur_path:
+            paths.append(cur_path)
+        return [p for p in paths if p and len(p) >= 2]
+
+    def _optimize_contours_order(self, contours):
+        if not contours:
+            return contours
+
+        remaining = []
+        for c in contours:
+            if not c or len(c) < 2:
+                continue
+            remaining.append(c)
+        if len(remaining) <= 1:
+            return remaining
+
+        def _dist2(a, b):
+            dx = float(a[0]) - float(b[0])
+            dy = float(a[1]) - float(b[1])
+            return dx * dx + dy * dy
+
+        cur = (0.0, 0.0)
+        ordered = []
+        used = [False] * len(remaining)
+        left = len(remaining)
+
+        while left > 0:
+            best_i = None
+            best_rev = False
+            best_d2 = None
+            for i, c in enumerate(remaining):
+                if used[i]:
+                    continue
+                d2_start = _dist2(cur, c[0])
+                d2_end = _dist2(cur, c[-1])
+                if best_d2 is None or d2_start < best_d2:
+                    best_d2 = d2_start
+                    best_i = i
+                    best_rev = False
+                if d2_end < best_d2:
+                    best_d2 = d2_end
+                    best_i = i
+                    best_rev = True
+
+            c = remaining[best_i]
+            if best_rev:
+                c = list(reversed(c))
+            ordered.append(c)
+            cur = c[-1]
+            used[best_i] = True
+            left -= 1
+
+        return ordered
     
     def on_paper_change(self, event=None):
         size_name = self.paper_var.get()
